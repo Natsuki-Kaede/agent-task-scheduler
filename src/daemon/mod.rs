@@ -3,10 +3,8 @@
 
 mod lock;
 
-use std::future::Future;
-use std::sync::{Arc, Mutex};
-
 use anyhow::{Context, Result};
+use std::future::Future;
 
 use crate::api::{self, AppState};
 use crate::paths::Paths;
@@ -19,11 +17,7 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
     let _lock = lock::acquire(&paths.lock)?;
 
     let store = Store::open(&paths.db)?;
-    let state = AppState {
-        store: Arc::new(Mutex::new(store)),
-        started_at: store::now(),
-        instance: crate::ids::new("d"),
-    };
+    let state = AppState::new(store, store::now(), crate::ids::new("d"));
     let router = api::router(state);
 
     // Holding the lock means no other daemon owns the socket file, so a
@@ -70,16 +64,16 @@ fn set_mode(path: &std::path::Path, mode: u32) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::client::{self, Transport};
     use std::time::Duration;
 
-    fn test_paths(dir: &std::path::Path) -> Paths {
+    pub(crate) fn test_paths(dir: &std::path::Path) -> Paths {
         Paths::with(dir.join("home"), dir.join("requests"))
     }
 
-    async fn wait_for_socket(paths: &Paths) {
+    pub(crate) async fn wait_for_socket(paths: &Paths) {
         for _ in 0..100 {
             if paths.socket.exists() {
                 return;

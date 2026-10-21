@@ -11,6 +11,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
+mod lifecycle;
+
 use crate::redact;
 use crate::store::{Entry, NewSubmission, RequestIdConflict, Store};
 
@@ -19,6 +21,29 @@ pub struct AppState {
     pub store: Arc<Mutex<Store>>,
     pub started_at: String,
     pub instance: String,
+    /// Bumped after every change to jobs or submissions, so that waiting
+    /// requests re-check their condition.
+    pub changes: Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl AppState {
+    pub fn new(store: Store, started_at: String, instance: String) -> Self {
+        Self {
+            store: Arc::new(Mutex::new(store)),
+            started_at,
+            instance,
+            changes: Arc::new(tokio::sync::watch::channel(0).0),
+        }
+    }
+
+    /// Wakes requests waiting for a change.
+    pub fn notify(&self) {
+        self.changes.send_modify(|n| *n += 1);
+    }
+
+    pub fn store(&self) -> std::sync::MutexGuard<'_, Store> {
+        self.store.lock().expect("store lock")
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -26,11 +51,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/jobs", get(list_jobs).post(submit))
         .route("/v1/submissions/{id}", get(submission))
+        .merge(lifecycle::routes())
         .with_state(state)
 }
 
 /// An error answered as JSON with a status code.
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -119,11 +145,8 @@ async fn submit(State(s): State<AppState>, Json(req): Json<SubmitRequest>) -> Ap
         service: req.service,
         options: serde_json::Value::Object(options),
     };
-    let created = s
-        .store
-        .lock()
-        .expect("store lock")
-        .create_submission(&new)?;
+    let created = s.store().create_submission(&new)?;
+    s.notify();
     let status = if created.existing {
         StatusCode::OK
     } else {
@@ -149,15 +172,13 @@ async fn list_jobs(State(s): State<AppState>, Query(q): Query<ListQuery>) -> Api
         })
         .unwrap_or_default();
     let jobs = s
-        .store
-        .lock()
-        .expect("store lock")
+        .store()
         .list_jobs(&states, q.limit.unwrap_or(100).min(1000))?;
     Ok(Json(jobs).into_response())
 }
 
 async fn submission(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    match s.store.lock().expect("store lock").submission(&id)? {
+    match s.store().submission(&id)? {
         Some(row) => Ok(Json(row).into_response()),
         None => Err(ApiError(
             StatusCode::NOT_FOUND,
@@ -174,15 +195,15 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        router(AppState {
-            store: Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
-            started_at: "t".into(),
-            instance: "i".into(),
-        })
+    pub(super) fn app() -> Router {
+        router(AppState::new(
+            Store::open_in_memory().unwrap(),
+            "t".into(),
+            "i".into(),
+        ))
     }
 
-    async fn call(
+    pub(super) async fn call(
         app: &Router,
         method: &str,
         path: &str,

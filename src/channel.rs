@@ -53,19 +53,32 @@ pub async fn serve(dir: PathBuf, router: Router) -> Result<()> {
     loop {
         for entry in std::fs::read_dir(&dir)? {
             let path = entry?.path();
-            if path.extension().is_some_and(|e| e == "req")
-                && let Err(e) = answer(&path, &router).await
-            {
-                tracing::warn!("request file {}: {e:#}", path.display());
+            if path.extension().is_none_or(|e| e != "req") {
+                continue;
             }
+            // Claim the request before answering it in its own task, so a
+            // long wait does not hold up the requests behind it.
+            let raw = match std::fs::read(&path)
+                .and_then(|raw| std::fs::remove_file(&path).map(|()| raw))
+            {
+                Ok(raw) => raw,
+                Err(e) => {
+                    tracing::warn!("request file {}: {e}", path.display());
+                    continue;
+                }
+            };
+            let router = router.clone();
+            tokio::spawn(async move {
+                if let Err(e) = answer(&path, raw, &router).await {
+                    tracing::warn!("request file {}: {e:#}", path.display());
+                }
+            });
         }
         tokio::time::sleep(POLL).await;
     }
 }
 
-async fn answer(path: &Path, router: &Router) -> Result<()> {
-    let raw = std::fs::read(path)?;
-    std::fs::remove_file(path)?;
+async fn answer(path: &Path, raw: Vec<u8>, router: &Router) -> Result<()> {
     let resp = match serde_json::from_slice::<FileRequest>(&raw) {
         Ok(req) => dispatch(router, req).await?,
         Err(e) => FileResponse {
@@ -142,6 +155,35 @@ mod tests {
             0,
             "channel files are cleaned up"
         );
+    }
+
+    #[tokio::test]
+    async fn a_slow_request_does_not_hold_up_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = Router::new()
+            .route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    "slow"
+                }),
+            )
+            .route("/fast", get(|| async { "fast" }));
+        let server = tokio::spawn(serve(dir.path().to_path_buf(), router));
+        let get = |path: &str| FileRequest {
+            method: "GET".into(),
+            path: path.into(),
+            body: None,
+        };
+        let slow_dir = dir.path().to_path_buf();
+        let slow = tokio::spawn(async move {
+            request(&slow_dir, &get("/slow"), Duration::from_secs(10)).await
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let fast = request(dir.path(), &get("/fast"), Duration::from_secs(1)).await;
+        assert_eq!(fast.unwrap().status, 200);
+        assert_eq!(slow.await.unwrap().unwrap().status, 200);
+        server.abort();
     }
 
     #[tokio::test]

@@ -260,6 +260,245 @@ impl Store {
             )
             .optional()?)
     }
+
+    /// Returns one job.
+    pub fn job(&self, id: &str) -> Result<Option<JobRow>> {
+        Ok(self
+            .list_jobs_where("j.id = ?", &[&id as &dyn rusqlite::ToSql])?
+            .into_iter()
+            .next())
+    }
+
+    fn list_jobs_where(&self, cond: &str, values: &[&dyn rusqlite::ToSql]) -> Result<Vec<JobRow>> {
+        let sql = format!(
+            "SELECT j.id, j.state, j.entry, j.command, j.cwd, j.project_root, j.service, j.exit_code,
+                    j.main_exit_code, j.log_path,
+                    (SELECT COUNT(*) FROM submissions s WHERE s.job_id = j.id),
+                    j.created_at, j.started_at, j.ended_at
+             FROM jobs j WHERE {cond}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(values, |r| {
+            Ok(JobRow {
+                id: r.get(0)?,
+                state: r.get(1)?,
+                entry: r.get(2)?,
+                command: r.get(3)?,
+                cwd: r.get(4)?,
+                project_root: r.get(5)?,
+                service: r.get(6)?,
+                exit_code: r.get(7)?,
+                main_exit_code: r.get(8)?,
+                log_path: r.get(9)?,
+                submissions: r.get(10)?,
+                created_at: r.get(11)?,
+                started_at: r.get(12)?,
+                ended_at: r.get(13)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    fn event(
+        tx: &rusqlite::Transaction,
+        job: &str,
+        kind: &str,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        tx.execute(
+            "INSERT INTO job_events (job_id, at, kind, detail) VALUES (?1, ?2, ?3, ?4)",
+            params![job, now(), kind, detail],
+        )?;
+        Ok(())
+    }
+
+    /// Updates a job and records an event in one transaction. Fails when the
+    /// job does not exist.
+    fn update_job(
+        &mut self,
+        job: &str,
+        set: &str,
+        values: &[&dyn rusqlite::ToSql],
+        event: &str,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let mut all: Vec<&dyn rusqlite::ToSql> = values.to_vec();
+        all.push(&job);
+        let n = tx.execute(
+            &format!("UPDATE jobs SET {set} WHERE id = ?{}", all.len()),
+            all.as_slice(),
+        )?;
+        if n == 0 {
+            bail!("no job {job}");
+        }
+        Self::event(&tx, job, event, detail)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records the executor that owns a job.
+    pub fn set_executor(&mut self, job: &str, pid: i64, start: &str) -> Result<()> {
+        self.update_job(
+            job,
+            "executor_pid = ?1, executor_start = ?2",
+            &[&pid, &start],
+            "executor",
+            Some(&pid.to_string()),
+        )
+    }
+
+    /// Persists a lease and moves the job to admitted (design 7.3: the
+    /// lease is committed before the executor is told).
+    pub fn grant_lease(&mut self, job: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let state: String = tx
+            .query_row("SELECT state FROM jobs WHERE id = ?1", params![job], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("no job {job}"))?;
+        if state != "queued" {
+            bail!("job {job} is {state}, not queued");
+        }
+        tx.execute(
+            "INSERT INTO leases (job_id, granted_at) VALUES (?1, ?2)",
+            params![job, now()],
+        )?;
+        tx.execute(
+            "UPDATE jobs SET state = 'admitted' WHERE id = ?1",
+            params![job],
+        )?;
+        Self::event(&tx, job, "admitted", None)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_started(&mut self, job: &str, log_path: &str) -> Result<()> {
+        let at = now();
+        self.update_job(
+            job,
+            "state = 'running', started_at = ?1, log_path = ?2",
+            &[&at, &log_path],
+            "started",
+            None,
+        )
+    }
+
+    /// Records the main execution process result; the job may still be
+    /// running (design 5.5).
+    pub fn set_main_result(&mut self, job: &str, code: i64) -> Result<()> {
+        self.update_job(
+            job,
+            "main_exit_code = ?1",
+            &[&code],
+            "main_exited",
+            Some(&code.to_string()),
+        )
+    }
+
+    /// Moves a job to a terminal state.
+    pub fn finish(&mut self, job: &str, state: &str, exit_code: Option<i64>) -> Result<()> {
+        if !is_terminal(state) {
+            bail!("{state} is not a terminal state");
+        }
+        let at = now();
+        self.update_job(
+            job,
+            "state = ?1, exit_code = ?2, ended_at = ?3, merge_fingerprint = NULL",
+            &[&state, &exit_code, &at],
+            state,
+            exit_code.map(|c| c.to_string()).as_deref(),
+        )
+    }
+
+    fn update_submission(&mut self, id: &str, set: &str) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        let job: String = tx
+            .query_row(
+                "SELECT job_id FROM submissions WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("no submission {id}"))?;
+        tx.execute(
+            &format!("UPDATE submissions SET {set} WHERE id = ?1"),
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok(job)
+    }
+
+    /// Cancels a submission. Returns the job id. A job left with no
+    /// uncanceled submission ends here while still queued; once running,
+    /// its executor stops it.
+    pub fn cancel_submission(&mut self, id: &str) -> Result<String> {
+        let job = self.update_submission(id, "canceled = 1")?;
+        if self.cancel_requested(&job)? && self.job(&job)?.is_some_and(|j| j.state == "queued") {
+            self.finish(&job, "canceled", None)?;
+        }
+        Ok(job)
+    }
+
+    pub fn detach_submission(&mut self, id: &str) -> Result<String> {
+        self.update_submission(id, "detached = 1")
+    }
+
+    /// Records that the submission's terminal state reached its caller.
+    pub fn mark_retrieved(&mut self, id: &str) -> Result<String> {
+        let row = self
+            .submission(id)?
+            .ok_or_else(|| anyhow::anyhow!("no submission {id}"))?;
+        if !is_terminal(&row.job_state) {
+            bail!(
+                "job {} is {}, not in a terminal state",
+                row.job,
+                row.job_state
+            );
+        }
+        self.update_submission(id, "final_retrieved = 1")
+    }
+
+    /// Finds the submission registered under a caller's request id.
+    pub fn submission_by_request(&self, request_id: &str) -> Result<Option<SubmissionRow>> {
+        let id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM submissions WHERE request_id = ?1",
+                params![request_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match id {
+            Some(id) => self.submission(&id),
+            None => Ok(None),
+        }
+    }
+
+    /// True when every submission of the job is canceled, so the job
+    /// should stop.
+    pub fn cancel_requested(&self, job: &str) -> Result<bool> {
+        let open: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM submissions WHERE job_id = ?1 AND canceled = 0",
+            params![job],
+            |r| r.get(0),
+        )?;
+        Ok(open == 0)
+    }
+}
+
+/// Terminal job states (design 5.1).
+pub fn is_terminal(state: &str) -> bool {
+    matches!(
+        state,
+        "completed"
+            | "start_failed"
+            | "canceled"
+            | "replaced"
+            | "externally_terminated"
+            | "ended_unknown"
+    )
 }
 
 #[cfg(test)]

@@ -3,14 +3,19 @@
 
 mod api;
 mod channel;
+mod cli;
 mod client;
 mod daemon;
+mod executor;
 mod ids;
 mod paths;
 mod redact;
+mod runspec;
 mod store;
+mod timing;
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -22,18 +27,84 @@ struct Cli {
     command: Command,
 }
 
+/// Identity and correlation, normally added by an agent hook.
+#[derive(clap::Args)]
+struct IdentityArgs {
+    /// Caller-generated id for querying this run later.
+    #[arg(long)]
+    request_id: Option<String>,
+    #[arg(long, hide = true)]
+    session: Option<String>,
+    #[arg(long, hide = true)]
+    tool: Option<String>,
+    #[arg(long, hide = true)]
+    call: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Run the daemon in the foreground.
     Daemon,
-    /// Show jobs.
-    Status {
-        /// Only jobs in these states, comma-separated.
+    /// Queue a command and run it when admitted.
+    ///
+    /// Returns the command's own output and exit code when its main process
+    /// finishes within the wait; otherwise prints one status line and exits
+    /// with 75 while the job continues. 77: rejected; 78: ats error.
+    Run {
+        /// Shell source, run by the submitter's shell.
+        #[arg(long, conflicts_with = "argv")]
+        sh: Option<String>,
+        /// How long to wait for the result, including system sleep.
+        #[arg(long, value_parser = humantime::parse_duration, default_value = "90s", conflicts_with = "no_wait")]
+        wait: Duration,
+        /// Return at once with the status line.
         #[arg(long)]
+        no_wait: bool,
+        #[command(flatten)]
+        identity: IdentityArgs,
+        /// The program and its arguments, run without a shell.
+        #[arg(last = true, required_unless_present = "sh")]
+        argv: Vec<String>,
+    },
+    /// Wait for a submission's job to end and report its state.
+    Wait {
+        submission: String,
+        /// How long to wait, including system sleep.
+        #[arg(long, value_parser = humantime::parse_duration, default_value = "90s")]
+        wait: Duration,
+    },
+    /// Show jobs, or one submission, job or request.
+    Status {
+        /// A submission or job id.
+        id: Option<String>,
+        /// The request id given to `ats run --request-id`.
+        #[arg(long, conflicts_with = "id")]
+        request: Option<String>,
+        /// Only jobs in these states, comma-separated.
+        #[arg(long, conflicts_with_all = ["id", "request"])]
         state: Option<String>,
         /// Print JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Print a submission's or job's output.
+    Logs {
+        id: String,
+        /// Keep printing until the job ends.
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Cancel a submission; the job stops when no other submission wants it.
+    Cancel { submission: String },
+    /// Mark a submission as left to run in the background.
+    Detach { submission: String },
+    /// Run one job's executor (started by `ats run`).
+    #[command(name = "__executor", hide = true)]
+    Executor {
+        #[arg(long)]
+        job: String,
+        #[arg(long)]
+        spec: String,
     },
 }
 
@@ -59,7 +130,39 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             daemon::run(paths, daemon::shutdown_signal()).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Status { state, json } => {
+        Command::Run {
+            sh,
+            wait,
+            no_wait,
+            identity,
+            argv,
+        } => {
+            let spec = match sh {
+                Some(source) => runspec::RunSpec::Sh {
+                    source,
+                    shell: runspec::RunSpec::default_shell(),
+                },
+                None => runspec::RunSpec::Argv { argv },
+            };
+            let wait = if no_wait { Duration::ZERO } else { wait };
+            let id = cli::Identity {
+                session: identity.session,
+                tool: identity.tool,
+                call: identity.call,
+                request_id: identity.request_id,
+            };
+            cli::run(&paths, spec, Some(wait), id).await
+        }
+        Command::Wait { submission, wait } => cli::wait(&paths, &submission, Some(wait)).await,
+        Command::Status {
+            id, request, json, ..
+        } if id.is_some() || request.is_some() => {
+            cli::status_one(&paths, id.as_deref(), request.as_deref(), json).await
+        }
+        Command::Logs { id, follow } => cli::logs(&paths, &id, follow).await,
+        Command::Cancel { submission } => cli::mark(&paths, &submission, "cancel").await,
+        Command::Detach { submission } => cli::mark(&paths, &submission, "detach").await,
+        Command::Status { state, json, .. } => {
             let path = match state {
                 Some(s) => format!("/v1/jobs?state={s}"),
                 None => "/v1/jobs".to_string(),
@@ -73,6 +176,12 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             } else {
                 print_jobs(&answer.body);
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Executor { job, spec } => {
+            let spec: runspec::RunSpec = serde_json::from_str(&spec)?;
+            executor::run(paths, job.clone(), spec, std::env::current_dir()?).await?;
+            let _ = std::fs::remove_file(executor::error_log(&job));
             Ok(ExitCode::SUCCESS)
         }
     }

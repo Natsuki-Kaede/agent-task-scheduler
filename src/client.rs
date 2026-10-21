@@ -35,6 +35,18 @@ pub async fn call(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<(Answer, Transport)> {
+    call_with_timeout(paths, method, path, body, CHANNEL_TIMEOUT).await
+}
+
+/// Like [`call`], for requests the daemon may hold open (such as a bounded
+/// wait): `channel_timeout` is how long to wait for a request-file answer.
+pub async fn call_with_timeout(
+    paths: &Paths,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    channel_timeout: Duration,
+) -> Result<(Answer, Transport)> {
     match via_socket(paths, method, path, body.as_ref()).await {
         Ok(answer) => Ok((answer, Transport::Socket)),
         Err(e) if socket_unreachable(&e) => {
@@ -43,7 +55,7 @@ pub async fn call(
                 path: path.into(),
                 body,
             };
-            let resp = channel::request(&paths.requests, &req, CHANNEL_TIMEOUT)
+            let resp = channel::request(&paths.requests, &req, channel_timeout)
                 .await
                 .map_err(|ce| {
                     anyhow!(

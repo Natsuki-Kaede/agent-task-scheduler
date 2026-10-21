@@ -75,18 +75,229 @@ paths:
               schema: { $ref: '#/components/schemas/Submission' }
         '404': { $ref: '#/components/responses/Error' }
 
+  /v1/jobs/{id}:
+    get:
+      summary: One job
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/jobs/{id}/executor:
+    post:
+      summary: Executor registers itself (process id and start time)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pid, start]
+              properties:
+                pid: { type: integer }
+                start: { type: string }
+      responses:
+        '204': { description: Recorded }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/jobs/{id}/lease:
+    post:
+      summary: Executor asks for the lease
+      description: |
+        The lease is committed before the answer. Admission control is not in
+        place yet, so a queued job is admitted at once.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: Granted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  granted: { type: boolean }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: The job is not queued (already admitted, or canceled)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorBody' }
+
+  /v1/jobs/{id}/started:
+    post:
+      summary: Executor started the command
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [log_path]
+              properties:
+                log_path: { type: string, description: Directory holding stdout.log and stderr.log }
+      responses:
+        '204': { description: Recorded }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/jobs/{id}/main-result:
+    post:
+      summary: The main execution process exited and both output streams ended
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [exit_code]
+              properties:
+                exit_code: { type: integer, description: 128 + signal number when killed by a signal }
+      responses:
+        '204': { description: Recorded }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/jobs/{id}/finished:
+    post:
+      summary: The job reached a terminal state
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [state]
+              properties:
+                state: { $ref: '#/components/schemas/JobState' }
+                exit_code: { type: [integer, 'null'] }
+      responses:
+        '204': { description: Recorded }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/jobs/{id}/control:
+    get:
+      summary: What the executor should do now
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cancel: { type: boolean, description: Every submission of the job is canceled }
+
+  /v1/submissions/{id}/wait:
+    post:
+      summary: Wait for a submission's job, up to a time limit
+      description: |
+        Waits until the condition holds or the time runs out (counted with
+        system sleep) and answers either way. "main": the main execution
+        process result is in, or the job ended. "terminal": the job ended.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [until]
+              properties:
+                until: { type: string, enum: [main, terminal] }
+                wait_seconds: { type: number, description: Absent waits without limit }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reached: { type: boolean }
+                  submission: { $ref: '#/components/schemas/Submission' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/submissions/{id}/cancel:
+    post:
+      summary: Cancel a submission
+      description: The job stops once none of its submissions is left uncanceled.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '204': { description: Recorded }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/submissions/{id}/detach:
+    post:
+      summary: Mark a submission as left to run in the background
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '204': { description: Recorded }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/submissions/{id}/retrieved:
+    post:
+      summary: Record that the submission's terminal state reached its caller
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '204': { description: Recorded }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: The job is not in a terminal state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorBody' }
+
+  /v1/requests/{id}:
+    get:
+      summary: The submission registered under a caller's request id
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Submission' }
+        '404': { $ref: '#/components/responses/Error' }
+
 components:
+  parameters:
+    Id:
+      { name: id, in: path, required: true, schema: { type: string } }
+
   responses:
     Error:
       description: Error
       content:
         application/json:
-          schema:
-            type: object
-            properties:
-              error: { type: string }
+          schema: { $ref: '#/components/schemas/ErrorBody' }
 
   schemas:
+    ErrorBody:
+      type: object
+      properties:
+        error: { type: string }
+
     JobState:
       type: string
       enum: [queued, blocked, capacity_insufficient, admitted, running, throttled, frozen, awaiting_takeover, completed, start_failed, canceled, replaced, externally_terminated, ended_unknown]
