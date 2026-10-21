@@ -1,0 +1,68 @@
+internal/recognize/contract.go
+  s_bb9527a6cd4695::t_f1733ababc8187 1-89
+internal/jobserver/contract.go
+  s_bb9527a6cd4695::t_4a268cdfacae9a 1-38
+internal/store/schema.sql
+  s_bb9527a6cd4695::t_14a4f76dcda483 1-147
+internal/adapter/descriptor.go
+  s_bb9527a6cd4695::t_1467ad65078afe 1-142
+internal/store/doc.go
+  s_bb9527a6cd4695::t_bb3fe9b636e32e 1-10
+internal/advisor/contract.go
+  s_bb9527a6cd4695::t_09fa90cde263ec 1-88
+internal/profile/fake.go
+  s_bb9527a6cd4695::t_d39ccd4efe2ca6 1-18
+api/openapi.yaml
+  s_bb9527a6cd4695::t_6a04d7ebad4018 1-607
+cmd/ats/main.go
+  s_bb9527a6cd4695::t_fa59ed8ea970cc 1-20
+AGENTS.md
+  s_bb9527a6cd4695::t_6e76c07e621071 1-33
+scripts/check.sh
+  s_bb9527a6cd4695::t_df62a6751bdd03 1-19
+internal/recognize/fake.go
+  s_bb9527a6cd4695::t_913229012ca5bb 1-28
+internal/profile/contract.go
+  s_bb9527a6cd4695::t_fe67026cab3304 1-143
+internal/control/contract.go
+  s_bb9527a6cd4695::t_b67ad8ccfc285f 1-51
+internal/timing/contract.go
+  s_bb9527a6cd4695::t_687d435c3e0c05 1-38
+internal/advisor/fake.go
+  s_bb9527a6cd4695::t_f4bf68a99a06bb 1-28
+go.mod
+  s_bb9527a6cd4695::t_7919586e8ad0a1 1-2
+  s_bb9527a6cd4695::t_f7ee221d87be2a 3
+.gitignore
+  s_bb9527a6cd4695::t_0eef76e382a1ce 5-6
+internal/credstore/fake.go
+  s_bb9527a6cd4695::t_a4b561f6627b52 1-53
+internal/timing/fake.go
+  s_bb9527a6cd4695::t_85a4b7b0d0d321 1-47
+internal/credstore/contract.go
+  s_bb9527a6cd4695::t_3a77042ba8cd8c 1-53
+internal/jobserver/fake.go
+  s_bb9527a6cd4695::t_83b689c9925f5d 1-37
+internal/metrics/fake.go
+  s_bb9527a6cd4695::t_7d0fd91e80e042 1-57
+internal/metrics/contract.go
+  s_bb9527a6cd4695::t_7ce2c1182099ca 1-103
+internal/control/fake.go
+  s_bb9527a6cd4695::t_f28921d8805c92 1-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "014d203f95185612fe019a556dc674ffa26350fa",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
