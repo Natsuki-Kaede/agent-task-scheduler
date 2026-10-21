@@ -1,0 +1,4 @@
+# Design-phase materials stay local and are never pushed
+/private/
+
+.DS_Store
