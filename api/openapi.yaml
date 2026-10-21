@@ -1,0 +1,151 @@
+openapi: 3.1.0
+info:
+  title: ats daemon API
+  version: 0.1.0
+  description: |
+    API of the Agent Task Scheduler daemon. The CLI, executors and hooks reach
+    it over a unix socket in the data directory; clients that cannot reach the
+    socket use the request-file channel, which carries the same requests.
+    Endpoints are added as the corresponding features land.
+
+paths:
+  /v1/health:
+    get:
+      summary: Daemon identity
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string }
+                  pid: { type: integer }
+                  started_at: { type: string, format: date-time }
+                  instance: { type: string, description: Changes every time the daemon starts }
+
+  /v1/jobs:
+    get:
+      summary: List jobs, newest first
+      parameters:
+        - { name: state, in: query, schema: { type: string }, description: Comma-separated job states }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Job' } }
+    post:
+      summary: Register a submission with a new job
+      description: |
+        The submission is committed before the daemon answers. Repeating a
+        request_id with the same command returns the earlier submission (200);
+        with a different command it is rejected (409).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubmitRequest' }
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Created' }
+        '200':
+          description: The request id was already registered with this command
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Created' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /v1/submissions/{id}:
+    get:
+      summary: One submission and its job's state
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Submission' }
+        '404': { $ref: '#/components/responses/Error' }
+
+components:
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+
+  schemas:
+    JobState:
+      type: string
+      enum: [queued, blocked, capacity_insufficient, admitted, running, throttled, frozen, awaiting_takeover, completed, start_failed, canceled, replaced, externally_terminated, ended_unknown]
+
+    SubmitRequest:
+      type: object
+      required: [entry, cwd]
+      properties:
+        entry: { type: string, enum: [argv, sh] }
+        argv: { type: array, items: { type: string }, description: Required for entry argv }
+        source: { type: string, description: Shell source, required for entry sh }
+        shell: { type: string, description: The submitter's shell for entry sh }
+        cwd: { type: string }
+        session: { type: string }
+        agent: { type: string }
+        invocation_key: { type: string }
+        request_id: { type: string }
+        sandbox_signature: { type: string }
+        service: { type: boolean, default: false }
+      additionalProperties: true
+
+    Created:
+      type: object
+      properties:
+        submission: { type: string }
+        job: { type: string }
+        state: { $ref: '#/components/schemas/JobState' }
+        existing: { type: boolean }
+
+    Job:
+      type: object
+      properties:
+        id: { type: string }
+        state: { $ref: '#/components/schemas/JobState' }
+        entry: { type: string, enum: [argv, sh] }
+        command: { type: string, description: Display form with secret-looking values redacted }
+        cwd: { type: string }
+        project_root: { type: string }
+        service: { type: boolean }
+        exit_code: { type: [integer, 'null'] }
+        main_exit_code: { type: [integer, 'null'] }
+        log_path: { type: [string, 'null'] }
+        submissions: { type: integer }
+        created_at: { type: string, format: date-time }
+        started_at: { type: [string, 'null'], format: date-time }
+        ended_at: { type: [string, 'null'], format: date-time }
+
+    Submission:
+      type: object
+      properties:
+        id: { type: string }
+        job: { type: string }
+        job_state: { $ref: '#/components/schemas/JobState' }
+        session_id: { type: [string, 'null'] }
+        agent: { type: [string, 'null'] }
+        request_id: { type: [string, 'null'] }
+        exit_code: { type: [integer, 'null'] }
+        main_exit_code: { type: [integer, 'null'] }
+        log_path: { type: [string, 'null'] }
+        canceled: { type: boolean }
+        detached: { type: boolean }
+        final_retrieved: { type: boolean }

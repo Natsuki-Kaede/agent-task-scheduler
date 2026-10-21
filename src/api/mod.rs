@@ -1,0 +1,260 @@
+//! The daemon's HTTP/JSON API (api/openapi.yaml). The same router serves the
+//! unix socket and the request-file channel.
+
+use std::sync::{Arc, Mutex};
+
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::json;
+
+use crate::redact;
+use crate::store::{Entry, NewSubmission, RequestIdConflict, Store};
+
+#[derive(Clone)]
+pub struct AppState {
+    pub store: Arc<Mutex<Store>>,
+    pub started_at: String,
+    pub instance: String,
+}
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/v1/health", get(health))
+        .route("/v1/jobs", get(list_jobs).post(submit))
+        .route("/v1/submissions/{id}", get(submission))
+        .with_state(state)
+}
+
+/// An error answered as JSON with a status code.
+pub struct ApiError(StatusCode, String);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        if e.downcast_ref::<RequestIdConflict>().is_some() {
+            return ApiError(StatusCode::CONFLICT, e.to_string());
+        }
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
+    }
+}
+
+type ApiResult<T> = Result<T, ApiError>;
+
+fn bad_request(msg: impl Into<String>) -> ApiError {
+    ApiError(StatusCode::BAD_REQUEST, msg.into())
+}
+
+async fn health(State(s): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
+        "started_at": s.started_at,
+        "instance": s.instance,
+    }))
+}
+
+/// Body of `POST /v1/jobs`.
+#[derive(Debug, Deserialize)]
+pub struct SubmitRequest {
+    pub entry: Entry,
+    #[serde(default)]
+    pub argv: Vec<String>,
+    pub source: Option<String>,
+    pub shell: Option<String>,
+    pub cwd: String,
+    pub session: Option<String>,
+    pub agent: Option<String>,
+    pub invocation_key: Option<String>,
+    pub request_id: Option<String>,
+    pub sandbox_signature: Option<String>,
+    #[serde(default)]
+    pub service: bool,
+    #[serde(flatten)]
+    pub options: serde_json::Map<String, serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for Entry {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match String::deserialize(d)?.as_str() {
+            "argv" => Ok(Entry::Argv),
+            "sh" => Ok(Entry::Sh),
+            other => Err(serde::de::Error::custom(format!("unknown entry {other:?}"))),
+        }
+    }
+}
+
+async fn submit(State(s): State<AppState>, Json(req): Json<SubmitRequest>) -> ApiResult<Response> {
+    let command = match req.entry {
+        Entry::Argv if req.argv.is_empty() => return Err(bad_request("argv entry needs argv")),
+        Entry::Argv => redact::command_words(&req.argv).join(" "),
+        Entry::Sh => redact::shell_source(
+            req.source
+                .as_deref()
+                .ok_or_else(|| bad_request("sh entry needs source"))?,
+        ),
+    };
+    let mut options = req.options.clone();
+    if let Some(shell) = &req.shell {
+        options.insert("shell".into(), json!(shell));
+    }
+    let new = NewSubmission {
+        entry: req.entry,
+        command,
+        project_root: req.cwd.clone(),
+        cwd: req.cwd,
+        session_id: req.session,
+        agent: req.agent,
+        invocation_key: req.invocation_key,
+        request_id: req.request_id,
+        sandbox_signature: req.sandbox_signature,
+        service: req.service,
+        options: serde_json::Value::Object(options),
+    };
+    let created = s
+        .store
+        .lock()
+        .expect("store lock")
+        .create_submission(&new)?;
+    let status = if created.existing {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(created)).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct ListQuery {
+    state: Option<String>,
+    limit: Option<u32>,
+}
+
+async fn list_jobs(State(s): State<AppState>, Query(q): Query<ListQuery>) -> ApiResult<Response> {
+    let states: Vec<String> = q
+        .state
+        .map(|v| {
+            v.split(',')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let jobs = s
+        .store
+        .lock()
+        .expect("store lock")
+        .list_jobs(&states, q.limit.unwrap_or(100).min(1000))?;
+    Ok(Json(jobs).into_response())
+}
+
+async fn submission(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    match s.store.lock().expect("store lock").submission(&id)? {
+        Some(row) => Ok(Json(row).into_response()),
+        None => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no submission {id}"),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        router(AppState {
+            store: Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+            started_at: "t".into(),
+            instance: "i".into(),
+        })
+    }
+
+    async fn call(
+        app: &Router,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(
+                body.map(|b| Body::from(b.to_string()))
+                    .unwrap_or_else(Body::empty),
+            )
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn submit_list_and_get() {
+        let app = app();
+        let (st, created) = call(&app, "POST", "/v1/jobs", Some(json!({
+            "entry": "sh", "source": "API_TOKEN=x make build", "cwd": "/w", "session": "s1", "now": false
+        }))).await;
+        assert_eq!(st, StatusCode::CREATED);
+        let sid = created["submission"].as_str().unwrap().to_string();
+
+        let (st, jobs) = call(&app, "GET", "/v1/jobs?state=queued", None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(jobs[0]["command"], "API_TOKEN=[redacted] make build");
+
+        let (st, sub) = call(&app, "GET", &format!("/v1/submissions/{sid}"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(sub["job_state"], "queued");
+        assert_eq!(sub["session_id"], "s1");
+    }
+
+    #[tokio::test]
+    async fn rejects_bad_and_conflicting_requests() {
+        let app = app();
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/jobs",
+            Some(json!({"entry": "argv", "cwd": "/w"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let body =
+            |src: &str| json!({"entry": "sh", "source": src, "cwd": "/w", "request_id": "r"});
+        assert_eq!(
+            call(&app, "POST", "/v1/jobs", Some(body("make"))).await.0,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            call(&app, "POST", "/v1/jobs", Some(body("make"))).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&app, "POST", "/v1/jobs", Some(body("make test")))
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            call(&app, "GET", "/v1/submissions/s_nope", None).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+}
