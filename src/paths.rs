@@ -22,7 +22,7 @@ pub struct Paths {
     pub profiles: PathBuf,
     /// Request-file channel. It lives under the temporary directory because
     /// sandboxed agents can usually write there but not to the data
-    /// directory (design 6.8).
+    /// directory (design 4).
     pub requests: PathBuf,
 }
 

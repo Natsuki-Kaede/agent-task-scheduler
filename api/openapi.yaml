@@ -6,7 +6,6 @@ info:
     API of the Agent Task Scheduler daemon. The CLI, executors and hooks reach
     it over a unix socket in the data directory; clients that cannot reach the
     socket use the request-file channel, which carries the same requests.
-    Endpoints are added as the corresponding features land.
 
 paths:
   /v1/health:
@@ -42,11 +41,10 @@ paths:
       description: |
         The daemon recognizes the command, predicts its resources, derives
         its locks and records its predecessors, all committed with the
-        submission before it answers. Repeating a request_id with the same
-        command returns the earlier submission (200); with a different
-        command it is rejected (409). `now` is refused (409) when a
+        submission before it answers. `now` is refused (409) when a
         predecessor has not succeeded or a lock is held; the error names
-        each conflict. A bad hint, urgency or predecessor gets 400.
+        each conflict. A bad hint or predecessor gets 400, and an unknown
+        field 422.
       requestBody:
         required: true
         content:
@@ -55,11 +53,6 @@ paths:
       responses:
         '201':
           description: Registered
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Created' }
-        '200':
-          description: The request id was already registered with this command
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Created' }
@@ -149,12 +142,6 @@ paths:
                   parallelism: { type: [integer, 'null'] }
                   jobserver_tokens: { type: [integer, 'null'] }
                   env: { type: array, items: { type: string } }
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  granted: { type: boolean }
         '404': { $ref: '#/components/responses/Error' }
         '409':
           description: The job ended before it started (for example, canceled), or the caller is not its executor
@@ -177,7 +164,6 @@ paths:
               properties:
                 log_path: { type: string, description: Directory holding stdout.log and stderr.log }
                 pgid: { type: integer, description: Process group of the command }
-                env: { type: object, additionalProperties: { type: string }, description: Environment the executor added, kept in the job's events }
       responses:
         '204': { description: Recorded }
         '404': { $ref: '#/components/responses/Error' }
@@ -216,8 +202,7 @@ paths:
               properties:
                 state: { $ref: '#/components/schemas/JobState' }
                 exit_code: { type: [integer, 'null'] }
-                cpu_seconds: { type: number, description: CPU time of every process the command waited for }
-                max_rss: { type: integer, description: Largest resident size of any one of them, in bytes; used only when sampling saw nothing }
+                max_rss: { type: integer, description: Largest resident size of any process the command waited for, in bytes; used only when sampling saw nothing }
       responses:
         '204': { description: Recorded }
         '400': { $ref: '#/components/responses/Error' }
@@ -239,7 +224,6 @@ paths:
                 type: object
                 properties:
                   cancel: { type: boolean, description: Every submission of the job is canceled }
-                  tokens: { type: [integer, 'null'], description: Jobserver tokens to leave in the pool; null keeps the leased number }
 
   /v1/submissions/{id}/wait:
     post:
@@ -292,20 +276,6 @@ paths:
         '204': { description: Recorded }
         '404': { $ref: '#/components/responses/Error' }
 
-  /v1/submissions/{id}/retrieved:
-    post:
-      summary: Record that the submission's terminal state reached its caller
-      parameters:
-        - { $ref: '#/components/parameters/Id' }
-      responses:
-        '204': { description: Recorded }
-        '404': { $ref: '#/components/responses/Error' }
-        '409':
-          description: The job is not in a terminal state
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorBody' }
-
   /v1/jobs/{id}/why:
     get:
       summary: Why a job is where it is
@@ -333,62 +303,14 @@ paths:
         '204': { description: Queued again }
         '404': { $ref: '#/components/responses/Error' }
 
-  /v1/jobs/{id}/pin:
-    post:
-      summary: Set or clear a job's manual queue position
-      parameters:
-        - { $ref: '#/components/parameters/Id' }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                rank: { type: [integer, 'null'], description: Lower runs first; null unpins }
-      responses:
-        '204': { description: Recorded }
-        '404': { $ref: '#/components/responses/Error' }
-
-  /v1/jobs/{id}/controls:
-    get:
-      summary: A job's current controls
-      parameters:
-        - { $ref: '#/components/parameters/Id' }
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Controls' }
-        '404': { $ref: '#/components/responses/Error' }
-    post:
-      summary: Set a job's controls
-      description: |
-        Replaces the job's controls. A running job moves to throttled or
-        frozen, and back, and the awake time in each is counted. Freezing
-        and duty cycles are refused (409) for jobs that must not be
-        stopped; only jobs holding a lease can be controlled.
-      parameters:
-        - { $ref: '#/components/parameters/Id' }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/Controls' }
-      responses:
-        '204': { description: Applied }
-        '400': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-
   /v1/pressure:
     get:
-      summary: The pressure level and the response
+      summary: Memory pressure and where memory goes
       description: |
-        Level 0 normal, 1 admission stopped, 2 other jobs slowed, 3 freezable
-        jobs frozen (design 11). Also where memory goes: managed jobs,
-        shared build daemons, and other processes.
+        Pressure is up while the swap-out rate, averaged over 10 seconds, is
+        at or above 64 pages a second or the system reports critical
+        pressure, and for 30 seconds after. While it is up nothing new is
+        admitted and running jobs are on background QoS.
       responses:
         '200':
           description: OK
@@ -397,45 +319,22 @@ paths:
               schema:
                 type: object
                 properties:
-                  level: { type: integer }
-                  signals:
-                    type: object
-                    properties:
-                      system_level: { type: integer }
-                      swap_ins: { type: number }
-                      swap_outs: { type: number }
-                      over_reservation: { type: boolean }
-                  calm_for: { type: number, description: Seconds at level 0 }
-                  managed: { type: integer }
-                  shared: { type: integer }
-                  unmanaged: { type: integer }
-                  source: { type: string, enum: [managed, unmanaged] }
-                  changes: { type: array, items: { type: array }, description: '[job, controls] pairs changed in the last second' }
-                  alerts: { type: array, items: { type: string }, description: Jobs frozen for more than 30 minutes of awake time }
+                  pressured: { type: boolean }
+                  swap_outs: { type: number, description: Pages per second, averaged over 10 seconds }
+                  system_level: { type: integer, description: '1 normal, 2 warning, 4 critical' }
+                  managed: { type: integer, description: Private memory resident in managed jobs, in bytes }
+                  unmanaged: { type: integer, description: Memory in use by everything else, in bytes }
 
   /v1/measurements:
     get:
       summary: The latest resource measurements
-      description: System memory and pressure, and per-job and shared-daemon usage, sampled every second.
+      description: System memory and pressure, and each job's private memory, sampled every second.
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Measurements' }
-
-  /v1/requests/{id}:
-    get:
-      summary: The submission registered under a caller's request id
-      parameters:
-        - { $ref: '#/components/parameters/Id' }
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Submission' }
-        '404': { $ref: '#/components/responses/Error' }
 
 components:
   parameters:
@@ -457,7 +356,7 @@ components:
 
     JobState:
       type: string
-      enum: [queued, blocked, capacity_insufficient, admitted, running, throttled, frozen, awaiting_takeover, completed, start_failed, canceled, replaced, externally_terminated, ended_unknown]
+      enum: [queued, blocked, capacity_insufficient, admitted, running, awaiting_takeover, completed, start_failed, canceled, ended_unknown]
 
     SubmitRequest:
       type: object
@@ -466,32 +365,21 @@ components:
         entry: { type: string, enum: [argv, sh] }
         argv: { type: array, items: { type: string }, description: Required for entry argv }
         source: { type: string, description: Shell source, required for entry sh }
-        shell: { type: string, description: The submitter's shell for entry sh }
         cwd: { type: string }
-        session: { type: string }
-        agent: { type: string }
-        invocation_key: { type: string }
-        request_id: { type: string }
-        sandbox_signature: { type: string }
-        service: { type: boolean, default: false }
+        session: { type: string, description: The agent session, from its hook }
         launcher_pid: { type: integer, description: The submitting CLI, which starts the executor }
         launcher_start: { type: string, description: Start time of the submitting CLI }
         after: { type: array, items: { type: string }, description: Job or submission ids that must succeed first }
         now: { type: boolean, default: false, description: Skip the queue unless a dependency or lock conflicts }
         lock: { type: array, items: { type: string }, description: Extra paths or named resources to lock }
-        hint: { type: string, description: 'Expected use such as mem=6G,cpu=4; used where higher than predicted' }
-        urgency: { type: string, enum: [low, normal, high] }
-        reason: { type: string }
-        no_freeze: { type: boolean, default: false, description: Never stop it with SIGSTOP }
-      additionalProperties: true
+        hint: { type: string, description: 'Expected memory such as mem=6G; used where higher than predicted' }
+      additionalProperties: false
 
     Created:
       type: object
       properties:
         submission: { type: string }
         job: { type: string }
-        state: { $ref: '#/components/schemas/JobState' }
-        existing: { type: boolean }
 
     Job:
       type: object
@@ -502,35 +390,24 @@ components:
         command: { type: string, description: Display form with secret-looking values redacted }
         cwd: { type: string }
         project_root: { type: string }
-        service: { type: boolean }
         exit_code: { type: [integer, 'null'] }
         main_exit_code: { type: [integer, 'null'] }
         log_path: { type: [string, 'null'] }
         executor_pid: { type: [integer, 'null'] }
         peak_private: { type: [integer, 'null'], description: Peak private memory in bytes }
-        cpu_seconds: { type: [number, 'null'] }
         submissions: { type: integer }
         created_at: { type: string, format: date-time }
         started_at: { type: [string, 'null'], format: date-time }
         ended_at: { type: [string, 'null'], format: date-time }
-
-    Controls:
-      type: object
-      properties:
-        background: { type: boolean, default: false, description: Background QoS }
-        frozen: { type: boolean, default: false }
-        duty: { type: [number, 'null'], description: Fraction of each second the job may run }
-        tokens: { type: [integer, 'null'], description: Jobserver tokens to leave in the pool }
-        by_pressure: { type: boolean, default: false, description: Set by the pressure response, which may also undo it; controls set by hand stay }
 
     Verdict:
       type: object
       description: |
         verdict is admit, wait (with a reason), blocked (with the failed
         predecessor `job`) or capacity_insufficient (with `need` and
-        `budget` in bytes). Wait reasons: recovering, pressure (level),
-        interval, no_executor, dependency (job), lock (resource, holder),
-        memory (need, free), cpu (need, free), behind (head).
+        `budget` in bytes). Wait reasons: recovering, pressure, settling,
+        no_executor, dependency (job), lock (resource, holder), memory
+        (need, free), behind (head).
       properties:
         verdict: { type: string, enum: [admit, wait, blocked, capacity_insufficient] }
         reason:
@@ -541,50 +418,28 @@ components:
         need: { type: integer }
         budget: { type: integer }
 
-    Usage:
+    JobUsage:
       type: object
       properties:
         processes: { type: array, items: { type: integer } }
-        cpu_cores: { type: number, description: Cores kept busy over the last second }
-        cpu_seconds: { type: number }
         private_resident: { type: integer, description: Private memory resident now, in bytes }
         private_total: { type: integer, description: Private memory including compressed and swapped-out parts }
         peak_private_total: { type: integer }
-        disk_read: { type: integer }
-        disk_write: { type: integer }
 
     Measurements:
       type: object
       properties:
         at: { type: string, format: date-time }
-        boot_id: { type: [string, 'null'] }
         system:
           type: [object, 'null']
           properties:
             mem_total: { type: integer }
             mem_used: { type: integer }
-            compressed: { type: integer }
-            swap_used: { type: integer }
             pressure: { type: integer, description: '1 normal, 2 warning, 4 critical' }
-            page_ins: { type: integer }
-            page_outs: { type: integer }
-            swap_ins: { type: integer }
-            swap_outs: { type: integer }
-            compressions: { type: integer }
-            decompressions: { type: integer }
-            perf_cores: { type: integer }
-            efficiency_cores: { type: integer }
-        rates:
-          type: object
-          description: Per-second rates of the system counters
-          additionalProperties: { type: number }
-        jobs: { type: object, additionalProperties: { $ref: '#/components/schemas/Usage' } }
-        shared: { type: object, additionalProperties: { $ref: '#/components/schemas/Usage' } }
-        last_sleep:
-          type: [object, 'null']
-          properties:
-            at: { type: string, format: date-time }
-            seconds: { type: number }
+            swap_outs: { type: integer, description: Pages swapped out since boot }
+            cores: { type: integer }
+        swap_outs: { type: number, description: Pages swapped out per second since the previous sample }
+        jobs: { type: object, additionalProperties: { $ref: '#/components/schemas/JobUsage' } }
 
     Submission:
       type: object
@@ -593,11 +448,8 @@ components:
         job: { type: string }
         job_state: { $ref: '#/components/schemas/JobState' }
         session_id: { type: [string, 'null'] }
-        agent: { type: [string, 'null'] }
-        request_id: { type: [string, 'null'] }
         exit_code: { type: [integer, 'null'] }
         main_exit_code: { type: [integer, 'null'] }
         log_path: { type: [string, 'null'] }
         canceled: { type: boolean }
         detached: { type: boolean }
-        final_retrieved: { type: boolean }

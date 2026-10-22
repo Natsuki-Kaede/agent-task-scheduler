@@ -8,52 +8,18 @@ use anyhow::Result;
 
 use crate::api::AppState;
 use crate::procinfo;
-use crate::sched::{self, Capacity, Dep, Held, Round, Settings, Verdict, Waiting};
+use crate::sched::{self, Capacity, Dep, Held, Round, Verdict, Waiting};
 use crate::store::Conflict;
 use crate::timing;
 
 const ROUND_EVERY: Duration = Duration::from_secs(1);
-/// How long a user interaction keeps raising its session's jobs (design
-/// 10.3: 10 minutes).
-const SESSION_DECAY: f64 = 600.0;
+/// After an admission, the next waits this long for the new job's memory to
+/// show in the measurements, unless the job ends first (design 10.1).
+const SETTLE: Duration = Duration::from_secs(3);
 
-/// Calibrated values, overridable from the dashboard through the settings
-/// table (design 9.4).
-struct Calibration {
-    /// C; the machine's memory when not set.
-    memory_budget: Option<u64>,
-    cpu_target: f64,
-    settings: Settings,
-}
-
-impl Calibration {
-    fn from(map: &HashMap<String, String>) -> Self {
-        let num = |key: &str| map.get(key).and_then(|v| v.parse::<f64>().ok());
-        let mut settings = Settings::default();
-        if let Some(v) = num("admission_interval") {
-            settings.interval = v;
-        }
-        if let Some(v) = num("tight_fraction") {
-            settings.tight = v;
-        }
-        Calibration {
-            memory_budget: map
-                .get("memory_budget")
-                .and_then(|v| crate::profile::parse_size(v).ok()),
-            cpu_target: num("cpu_target").unwrap_or(1.25),
-            settings,
-        }
-    }
-}
-
-fn seconds_since(rfc3339: &str) -> Option<f64> {
+fn seconds_between(rfc3339: &str, now: SystemTime) -> Option<f64> {
     let at = humantime::parse_rfc3339(rfc3339).ok()?;
-    Some(
-        SystemTime::now()
-            .duration_since(at)
-            .unwrap_or_default()
-            .as_secs_f64(),
-    )
+    Some(now.duration_since(at).unwrap_or_default().as_secs_f64())
 }
 
 pub async fn run(state: AppState) {
@@ -75,75 +41,44 @@ pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>
         .lock()
         .expect("measurements lock")
         .clone();
-    let (queued, mut held_jobs, interactions, cal) = {
+    let (queued, held_jobs) = {
         let store = state.store();
-        (
-            store.queued_jobs()?,
-            store.held_jobs()?,
-            store.session_interactions()?,
-            Calibration::from(&store.settings()?),
-        )
+        (store.queued_jobs()?, store.held_jobs()?)
     };
     if queued.is_empty() {
         state.verdicts.lock().expect("verdicts lock").clear();
         return Ok(());
     }
-
-    // Reservations follow measurements upward (design 10.2).
-    let mut over = false;
-    for h in &mut held_jobs {
-        if let Some(u) = snapshot.jobs.get(&h.id)
-            && u.peak_private_total > h.reserved_private
-        {
-            state
-                .store()
-                .raise_reservation(&h.id, u.peak_private_total)?;
-            h.reserved_private = u.peak_private_total;
-            over = true;
-        }
-    }
-
     let Some(system) = snapshot.system.clone() else {
         // Nothing measured yet: wait for the first sample.
         return Ok(());
     };
     let capacity = Capacity {
-        memory: cal.memory_budget.unwrap_or(system.mem_total),
+        memory: system.mem_total,
         used: system.mem_used,
-        cores: f64::from(system.perf_cores + system.efficiency_cores).max(1.0),
-        cpu_target: cal.cpu_target,
     };
+    let wall = SystemTime::now();
+    let seconds_since = |at: &str| seconds_between(at, wall);
     let held: Vec<Held> = held_jobs
         .iter()
         .map(|h| Held {
             id: h.id.clone(),
             reserved: h.reserved_private,
             resident: snapshot.jobs.get(&h.id).map_or(0, |u| u.private_resident),
-            extra: h.extra,
-            cores: h.predicted_cores,
             locks: h.locks.clone(),
             ends_in: h
                 .predicted_seconds
-                .zip(h.started_at.as_deref().and_then(seconds_since))
+                .zip(h.started_at.as_deref().and_then(&seconds_since))
                 .map(|(total, ran)| (total - ran).max(0.0)),
         })
         .collect();
     let awaited = state.awaited_jobs();
-    let recency = |sessions: &[String]| {
-        sessions
-            .iter()
-            .filter_map(|s| interactions.get(s).and_then(|at| seconds_since(at)))
-            .map(|ago| (1.0 - ago / SESSION_DECAY).max(0.0))
-            .fold(0.0, f64::max)
-    };
     let waiting: Vec<Waiting> = queued
         .iter()
         .map(|q| Waiting {
             id: q.id.clone(),
             age: seconds_since(&q.created_at).unwrap_or(0.0),
             reserved: q.predicted_private,
-            extra: q.predicted_extra,
-            cores: q.predicted_cores,
             seconds: q.predicted_seconds,
             locks: q.locks.clone(),
             deps: q
@@ -166,35 +101,20 @@ pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>
                 .as_ref()
                 .is_some_and(|(pid, start)| procinfo::alive(*pid as i32, start)),
             awaited: awaited.contains(&q.id),
-            session_recency: recency(&q.sessions),
-            urgency: q.urgency,
-            pinned: q.pinned,
         })
         .collect();
 
-    // Admissions are spaced so the last one's memory shows up in the
-    // measurements (design 10.2); a job that already ended needs no wait.
     let now = timing::elapsed();
-    admissions.retain(|job, _| held_jobs.iter().any(|h| &h.id == job));
-    let since_admission = admissions
-        .values()
-        .map(|t| now.saturating_sub(*t).as_secs_f64())
-        .reduce(f64::min);
+    admissions.retain(|job, at| {
+        now.saturating_sub(*at) < SETTLE && held_jobs.iter().any(|h| &h.id == job)
+    });
     let verdicts = sched::decide(&Round {
         capacity: &capacity,
         held: &held,
         waiting: &waiting,
-        // The pressure loop's level, and level 1 at once for a job just
-        // found above its reservation (design 11).
-        pressure: state
-            .pressure
-            .lock()
-            .expect("pressure lock")
-            .level
-            .max(u8::from(over)),
-        since_admission,
+        pressure: state.pressure.lock().expect("pressure lock").pressured,
+        settling: !admissions.is_empty(),
         admitting: state.admitting(),
-        settings: &cal.settings,
     });
 
     let states: HashMap<&str, &str> = queued
@@ -202,6 +122,7 @@ pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>
         .map(|q| (q.id.as_str(), q.state.as_str()))
         .collect();
     let by_id: HashMap<&str, &Waiting> = waiting.iter().map(|w| (w.id.as_str(), w)).collect();
+    let mut running = held.len() as u32;
     let mut changed = false;
     let mut waiting_verdicts = HashMap::new();
     for (id, verdict) in verdicts {
@@ -209,13 +130,14 @@ pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>
         let mut store = state.store();
         match &verdict {
             Verdict::Admit => {
-                let w = by_id[id.as_str()];
-                // The leased parallelism: its predicted cores, within the machine.
-                let parallelism = w.cores.round().clamp(1.0, capacity.cores) as u32;
-                match store.admit(&id, w.reserved, w.extra, parallelism) {
+                let reserved = by_id[id.as_str()].reserved;
+                // Cores shared among the running jobs and this one (design 10.5).
+                let parallelism = (system.cores / (running + 1)).max(1);
+                match store.admit(&id, reserved, parallelism) {
                     Ok(()) => {
-                        tracing::info!(job = %id, reserved = w.reserved, "admitted");
+                        tracing::info!(job = %id, reserved, parallelism, "admitted");
                         admissions.insert(id.clone(), now);
+                        running += 1;
                         changed = true;
                         continue;
                     }
@@ -252,6 +174,8 @@ mod tests {
     use super::*;
     use crate::sample::{Snapshot, System};
 
+    const G: u64 = 1 << 30;
+
     fn submit(state: &AppState, mem: u64, after: &[&str]) -> String {
         use crate::sched::predict::Prediction;
         use crate::store::{Entry, NewSubmission, Plan};
@@ -261,19 +185,9 @@ mod tests {
             cwd: "/w".into(),
             project_root: "/w".into(),
             session_id: None,
-            agent: None,
-            invocation_key: None,
-            request_id: None,
-            sandbox_signature: None,
-            service: false,
-            options: serde_json::json!({}),
             launcher: None,
             plan: Plan {
-                prediction: Prediction {
-                    private: mem,
-                    cores: 1.0,
-                    ..Prediction::default()
-                },
+                prediction: Prediction { mem, seconds: None },
                 after: after.iter().map(|s| s.to_string()).collect(),
                 ..Plan::default()
             },
@@ -292,9 +206,15 @@ mod tests {
         state.store().job(job).unwrap().unwrap().state
     }
 
+    fn reason(state: &AppState, job: &str) -> sched::Reason {
+        match &state.verdicts.lock().unwrap()[job] {
+            Verdict::Wait { reason } => reason.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
-    fn rounds_admit_space_block_and_refuse() {
-        const G: u64 = 1 << 30;
+    fn rounds_admit_settle_block_and_refuse() {
         let state = AppState::new(
             crate::store::Store::open_in_memory().unwrap(),
             "t".into(),
@@ -304,8 +224,7 @@ mod tests {
             system: Some(System {
                 mem_total: 16 * G,
                 mem_used: 4 * G,
-                perf_cores: 4,
-                efficiency_cores: 4,
+                cores: 8,
                 pressure: 1,
                 ..System::default()
             }),
@@ -314,60 +233,49 @@ mod tests {
         let mut admissions = HashMap::new();
 
         let a = submit(&state, 2 * G, &[]);
+        let a2 = submit(&state, 2 * G, &[]);
         round(&state, &mut admissions).unwrap();
-        assert_eq!(job_state(&state, &a), "admitted");
-        assert_eq!(state.store().job(&a).unwrap().unwrap().state, "admitted");
+        assert_eq!(
+            (job_state(&state, &a), job_state(&state, &a2)),
+            ("admitted".into(), "admitted".into())
+        );
+        let parallelism = |job: &str| state.store().lease_terms(job).unwrap().parallelism;
+        assert_eq!(
+            (parallelism(&a), parallelism(&a2)),
+            (Some(8), Some(4)),
+            "cores / (running + 1)"
+        );
 
-        // While a is running, the next admission waits for the interval.
+        // While a and a2 settle, the next admission waits.
         let b = submit(&state, G, &[]);
         let too_big = submit(&state, 20 * G, &[]);
         round(&state, &mut admissions).unwrap();
-        assert_eq!(job_state(&state, &b), "queued");
-        assert_eq!(
-            state.verdicts.lock().unwrap()[&b],
-            Verdict::Wait {
-                reason: sched::Reason::Interval
-            }
-        );
+        assert_eq!(reason(&state, &b), sched::Reason::Settling);
         assert_eq!(job_state(&state, &too_big), "capacity_insufficient");
 
-        // A failed predecessor blocks; unblocking queues it again.
+        // A failed predecessor blocks; once the new jobs end, nothing settles.
         state.store().finish(&a, "completed", Some(1)).unwrap();
+        state.store().finish(&a2, "completed", Some(0)).unwrap();
         let c = submit(&state, G, &[&a]);
         round(&state, &mut admissions).unwrap();
         assert_eq!(job_state(&state, &c), "blocked");
-        assert_eq!(
-            job_state(&state, &b),
-            "admitted",
-            "a ended, so no spacing is needed"
-        );
+        assert_eq!(job_state(&state, &b), "admitted");
         state.store().unblock(&c).unwrap();
         assert_eq!(job_state(&state, &c), "queued");
 
+        // Pressure holds admission.
+        state.store().finish(&b, "completed", Some(0)).unwrap();
+        state.pressure.lock().unwrap().pressured = true;
+        round(&state, &mut admissions).unwrap();
+        assert_eq!(reason(&state, &c), sched::Reason::Pressure);
+        state.pressure.lock().unwrap().pressured = false;
+
         // While executors reconnect after a restart, nothing is admitted.
         state.expect_reconnects(["gone".to_string()].into(), Duration::from_secs(60));
-        state.store().finish(&b, "completed", Some(0)).unwrap();
         round(&state, &mut admissions).unwrap();
-        assert_eq!(job_state(&state, &c), "queued");
-        assert_eq!(
-            state.verdicts.lock().unwrap()[&c],
-            Verdict::Wait {
-                reason: sched::Reason::Recovering
-            }
-        );
+        assert_eq!(reason(&state, &c), sched::Reason::Recovering);
         state.contact("gone");
         round(&state, &mut admissions).unwrap();
         assert_eq!(job_state(&state, &c), "admitted");
-    }
-
-    #[test]
-    fn calibration_overrides() {
-        let map: HashMap<String, String> = [("memory_budget", "12G"), ("admission_interval", "1")]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let cal = Calibration::from(&map);
-        assert_eq!(cal.memory_budget, Some(12 << 30));
-        assert_eq!(cal.settings.interval, 1.0);
     }
 }

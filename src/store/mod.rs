@@ -1,5 +1,5 @@
-//! The daemon's SQLite store (design 13). Only the daemon opens it; writes
-//! are committed before the daemon answers (design 7.3).
+//! The daemon's SQLite store (design 11). Only the daemon opens it; writes
+//! are committed before the daemon answers (design 7.1).
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -11,9 +11,6 @@ use serde::Serialize;
 use crate::sched::locks::Lock;
 use crate::sched::predict::Prediction;
 
-mod control;
-
-pub use control::HeldControl;
 mod history;
 mod sched;
 
@@ -40,19 +37,12 @@ pub struct NewSubmission {
     pub cwd: String,
     pub project_root: String,
     pub session_id: Option<String>,
-    pub agent: Option<String>,
-    pub invocation_key: Option<String>,
-    pub request_id: Option<String>,
-    pub sandbox_signature: Option<String>,
-    pub service: bool,
-    /// Options as JSON, kept for status and recovery.
-    pub options: serde_json::Value,
     /// The process that will start the executor, as (pid, start time).
     pub launcher: Option<(i64, String)>,
     pub plan: Plan,
 }
 
-/// What admission needs to know about a new job (design 5.2, 10).
+/// What admission needs to know about a new job (design 10).
 #[derive(Debug, Clone, Default)]
 pub struct Plan {
     pub profiles: Vec<String>,
@@ -61,7 +51,6 @@ pub struct Plan {
     /// Predecessor job ids from `--after`.
     pub after: Vec<String>,
     pub run_now: bool,
-    pub urgency: i8,
     /// Tool and subcommand of a one-command line, for history lookups.
     pub history_key: Option<String>,
     /// Environment variables set to the leased parallelism (design 10.5).
@@ -90,9 +79,6 @@ impl Entry {
 pub struct Created {
     pub submission: String,
     pub job: String,
-    pub state: String,
-    /// True when an earlier submission with the same request id was found.
-    pub existing: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,14 +89,12 @@ pub struct JobRow {
     pub command: String,
     pub cwd: String,
     pub project_root: String,
-    pub service: bool,
     pub exit_code: Option<i64>,
     pub main_exit_code: Option<i64>,
     pub log_path: Option<String>,
     pub executor_pid: Option<i64>,
     /// Peak private memory measured so far, in bytes.
     pub peak_private: Option<i64>,
-    pub cpu_seconds: Option<f64>,
     pub submissions: i64,
     pub created_at: String,
     pub started_at: Option<String>,
@@ -123,14 +107,11 @@ pub struct SubmissionRow {
     pub job: String,
     pub job_state: String,
     pub session_id: Option<String>,
-    pub agent: Option<String>,
-    pub request_id: Option<String>,
     pub exit_code: Option<i64>,
     pub main_exit_code: Option<i64>,
     pub log_path: Option<String>,
     pub canceled: bool,
     pub detached: bool,
-    pub final_retrieved: bool,
 }
 
 /// A job that has not ended, as the recovery check sees it.
@@ -152,31 +133,6 @@ fn process(pid: Option<i64>, start: Option<String>) -> Option<(i64, String)> {
     pid.zip(start)
 }
 
-/// A 5-second summary of a job's measured usage (design 9.2).
-#[derive(Debug, Clone, PartialEq)]
-pub struct JobSample {
-    pub job: String,
-    pub private_resident: u64,
-    pub private_total: u64,
-    pub peak_private_total: u64,
-    pub cpu_seconds: f64,
-    pub disk_read: u64,
-    pub disk_write: u64,
-}
-
-/// A running total of awake time a job spends in a state (design 9.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IntervalTotal {
-    pub awake_ns: i64,
-    /// Part of the time could not be counted, for example across a reboot.
-    pub uncertain: bool,
-}
-
-/// A request id that is already bound to a different command.
-#[derive(Debug, thiserror::Error)]
-#[error("request id {0} is already used by a different command")]
-pub struct RequestIdConflict(pub String);
-
 /// The named job or submission does not exist.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -193,6 +149,30 @@ fn no_job(job: &str) -> anyhow::Error {
 
 fn no_submission(id: &str) -> anyhow::Error {
     NotFound(format!("no submission {id}")).into()
+}
+
+const JOB_COLUMNS: &str = "j.id, j.state, j.entry, j.command, j.cwd, j.project_root, j.exit_code,
+    j.main_exit_code, j.log_path, j.executor_pid, j.peak_private,
+    (SELECT COUNT(*) FROM submissions s WHERE s.job_id = j.id), j.created_at, j.started_at, j.ended_at";
+
+fn job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
+    Ok(JobRow {
+        id: r.get(0)?,
+        state: r.get(1)?,
+        entry: r.get(2)?,
+        command: r.get(3)?,
+        cwd: r.get(4)?,
+        project_root: r.get(5)?,
+        exit_code: r.get(6)?,
+        main_exit_code: r.get(7)?,
+        log_path: r.get(8)?,
+        executor_pid: r.get(9)?,
+        peak_private: r.get(10)?,
+        submissions: r.get(11)?,
+        created_at: r.get(12)?,
+        started_at: r.get(13)?,
+        ended_at: r.get(14)?,
+    })
 }
 
 impl Store {
@@ -223,82 +203,42 @@ impl Store {
         Ok(Self { conn })
     }
 
-    /// Registers a submission with a new queued job, in one transaction.
-    /// A repeated request id returns the earlier submission when the command
-    /// matches, and fails with [`RequestIdConflict`] when it differs.
+    /// Registers a submission with a new queued job, its locks and its
+    /// dependencies, in one transaction.
     pub fn create_submission(&mut self, new: &NewSubmission) -> Result<Created> {
         let tx = self.conn.transaction()?;
-        if let Some(rid) = &new.request_id {
-            let found: Option<(String, String, String, String)> = tx
-                .query_row(
-                    "SELECT s.id, j.id, j.state, j.command FROM submissions s JOIN jobs j ON j.id = s.job_id
-                     WHERE s.request_id = ?1",
-                    params![rid],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .optional()?;
-            if let Some((submission, job, state, command)) = found {
-                if command != new.command {
-                    return Err(RequestIdConflict(rid.clone()).into());
-                }
-                return Ok(Created {
-                    submission,
-                    job,
-                    state,
-                    existing: true,
-                });
-            }
-        }
         let job = crate::ids::new("j");
         let submission = crate::ids::new("s");
         let at = now();
+        let p = &new.plan;
         tx.execute(
-            "INSERT INTO jobs (id, node_id, state, cwd, project_root, entry, command, service,
-                               launcher_pid, launcher_start, created_at, profile, predicted_private,
-                               predicted_extra, predicted_cores, freezable, run_now, urgency,
-                               predicted_seconds, history_key, parallel_env, jobserver)
-             VALUES (?1, 'local', 'queued', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20)",
+            "INSERT INTO jobs (id, state, cwd, project_root, entry, command, profile, history_key,
+                               predicted_private, predicted_seconds, run_now, parallel_env, jobserver,
+                               launcher_pid, launcher_start, created_at)
+             VALUES (?1, 'queued', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 job,
                 new.cwd,
                 new.project_root,
                 new.entry.as_str(),
                 new.command,
-                new.service,
+                serde_json::to_string(&p.profiles)?,
+                p.history_key,
+                p.prediction.mem as i64,
+                p.prediction.seconds,
+                p.run_now,
+                serde_json::to_string(&p.parallel_env)?,
+                p.jobserver,
                 new.launcher.as_ref().map(|l| l.0),
                 new.launcher.as_ref().map(|l| &l.1),
                 at,
-                serde_json::to_string(&new.plan.profiles)?,
-                new.plan.prediction.private as i64,
-                new.plan.prediction.extra as i64,
-                new.plan.prediction.cores,
-                new.plan.prediction.freezable,
-                new.plan.run_now,
-                new.plan.urgency,
-                new.plan.prediction.seconds,
-                new.plan.history_key,
-                serde_json::to_string(&new.plan.parallel_env)?,
-                new.plan.jobserver,
             ],
         )?;
         tx.execute(
-            "INSERT INTO submissions (id, job_id, session_id, agent, invocation_key, request_id,
-                                      sandbox_signature, options, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                submission,
-                job,
-                new.session_id,
-                new.agent,
-                new.invocation_key,
-                new.request_id,
-                new.sandbox_signature,
-                new.options.to_string(),
-                at
-            ],
+            "INSERT INTO submissions (id, job_id, session_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![submission, job, new.session_id, at],
         )?;
-        for lock in &new.plan.locks {
+        for lock in &p.locks {
             let (kind, resource) = match lock {
                 Lock::Path(p) => ("path", p),
                 Lock::Named(n) => ("named", n),
@@ -308,34 +248,20 @@ impl Store {
                 params![job, resource, kind],
             )?;
         }
-        for after in &new.plan.after {
+        for after in &p.after {
             tx.execute(
                 "INSERT OR IGNORE INTO dependencies (job_id, after_job_id) VALUES (?1, ?2)",
                 params![job, after],
             )?;
         }
-        tx.execute(
-            "INSERT INTO job_events (job_id, at, kind) VALUES (?1, ?2, 'submitted')",
-            params![job, at],
-        )?;
+        Self::event(&tx, &job, "submitted", None)?;
         tx.commit()?;
-        Ok(Created {
-            submission,
-            job,
-            state: "queued".into(),
-            existing: false,
-        })
+        Ok(Created { submission, job })
     }
 
     /// Lists jobs, newest first, optionally filtered by state.
     pub fn list_jobs(&self, states: &[String], limit: u32) -> Result<Vec<JobRow>> {
-        let mut sql = String::from(
-            "SELECT j.id, j.state, j.entry, j.command, j.cwd, j.project_root, j.service, j.exit_code,
-                    j.main_exit_code, j.log_path, j.executor_pid, j.peak_private, j.cpu_seconds,
-                    (SELECT COUNT(*) FROM submissions s WHERE s.job_id = j.id),
-                    j.created_at, j.started_at, j.ended_at
-             FROM jobs j",
-        );
+        let mut sql = format!("SELECT {JOB_COLUMNS} FROM jobs j");
         if !states.is_empty() {
             let marks = vec!["?"; states.len()].join(",");
             sql.push_str(&format!(" WHERE j.state IN ({marks})"));
@@ -345,37 +271,28 @@ impl Store {
         let mut values: Vec<&dyn rusqlite::ToSql> =
             states.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
         values.push(&limit);
-        let rows = stmt.query_map(values.as_slice(), |r| {
-            Ok(JobRow {
-                id: r.get(0)?,
-                state: r.get(1)?,
-                entry: r.get(2)?,
-                command: r.get(3)?,
-                cwd: r.get(4)?,
-                project_root: r.get(5)?,
-                service: r.get(6)?,
-                exit_code: r.get(7)?,
-                main_exit_code: r.get(8)?,
-                log_path: r.get(9)?,
-                executor_pid: r.get(10)?,
-                peak_private: r.get(11)?,
-                cpu_seconds: r.get(12)?,
-                submissions: r.get(13)?,
-                created_at: r.get(14)?,
-                started_at: r.get(15)?,
-                ended_at: r.get(16)?,
-            })
-        })?;
+        let rows = stmt.query_map(values.as_slice(), job_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Returns one submission with its job's state.
+    pub fn job(&self, id: &str) -> Result<Option<JobRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {JOB_COLUMNS} FROM jobs j WHERE j.id = ?1"),
+                params![id],
+                job_row,
+            )
+            .optional()?)
+    }
+
+    /// One submission with its job's state.
     pub fn submission(&self, id: &str) -> Result<Option<SubmissionRow>> {
         Ok(self
             .conn
             .query_row(
-                "SELECT s.id, s.job_id, j.state, s.session_id, s.agent, s.request_id, j.exit_code,
-                        j.main_exit_code, j.log_path, s.canceled, s.detached, s.final_retrieved
+                "SELECT s.id, s.job_id, j.state, s.session_id, j.exit_code, j.main_exit_code, j.log_path,
+                        s.canceled, s.detached
                  FROM submissions s JOIN jobs j ON j.id = s.job_id WHERE s.id = ?1",
                 params![id],
                 |r| {
@@ -384,59 +301,15 @@ impl Store {
                         job: r.get(1)?,
                         job_state: r.get(2)?,
                         session_id: r.get(3)?,
-                        agent: r.get(4)?,
-                        request_id: r.get(5)?,
-                        exit_code: r.get(6)?,
-                        main_exit_code: r.get(7)?,
-                        log_path: r.get(8)?,
-                        canceled: r.get(9)?,
-                        detached: r.get(10)?,
-                        final_retrieved: r.get(11)?,
+                        exit_code: r.get(4)?,
+                        main_exit_code: r.get(5)?,
+                        log_path: r.get(6)?,
+                        canceled: r.get(7)?,
+                        detached: r.get(8)?,
                     })
                 },
             )
             .optional()?)
-    }
-
-    /// Returns one job.
-    pub fn job(&self, id: &str) -> Result<Option<JobRow>> {
-        Ok(self
-            .list_jobs_where("j.id = ?", &[&id as &dyn rusqlite::ToSql])?
-            .into_iter()
-            .next())
-    }
-
-    fn list_jobs_where(&self, cond: &str, values: &[&dyn rusqlite::ToSql]) -> Result<Vec<JobRow>> {
-        let sql = format!(
-            "SELECT j.id, j.state, j.entry, j.command, j.cwd, j.project_root, j.service, j.exit_code,
-                    j.main_exit_code, j.log_path, j.executor_pid, j.peak_private, j.cpu_seconds,
-                    (SELECT COUNT(*) FROM submissions s WHERE s.job_id = j.id),
-                    j.created_at, j.started_at, j.ended_at
-             FROM jobs j WHERE {cond}"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(values, |r| {
-            Ok(JobRow {
-                id: r.get(0)?,
-                state: r.get(1)?,
-                entry: r.get(2)?,
-                command: r.get(3)?,
-                cwd: r.get(4)?,
-                project_root: r.get(5)?,
-                service: r.get(6)?,
-                exit_code: r.get(7)?,
-                main_exit_code: r.get(8)?,
-                log_path: r.get(9)?,
-                executor_pid: r.get(10)?,
-                peak_private: r.get(11)?,
-                cpu_seconds: r.get(12)?,
-                submissions: r.get(13)?,
-                created_at: r.get(14)?,
-                started_at: r.get(15)?,
-                ended_at: r.get(16)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     fn event(
@@ -452,8 +325,8 @@ impl Store {
         Ok(())
     }
 
-    /// Updates a job that is not in a terminal state and records an event,
-    /// in one transaction.
+    /// Updates a job that has not ended and records an event, in one
+    /// transaction.
     fn update_job(
         &mut self,
         job: &str,
@@ -463,7 +336,12 @@ impl Store {
         detail: Option<&str>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        let state = Self::state_in(&tx, job)?;
+        let state: String = tx
+            .query_row("SELECT state FROM jobs WHERE id = ?1", params![job], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| no_job(job))?;
         if is_terminal(&state) {
             return Err(Conflict(format!("job {job} has already ended ({state})")).into());
         }
@@ -476,14 +354,6 @@ impl Store {
         Self::event(&tx, job, event, detail)?;
         tx.commit()?;
         Ok(())
-    }
-
-    fn state_in(tx: &rusqlite::Transaction, job: &str) -> Result<String> {
-        tx.query_row("SELECT state FROM jobs WHERE id = ?1", params![job], |r| {
-            r.get(0)
-        })
-        .optional()?
-        .ok_or_else(|| no_job(job))
     }
 
     /// Records the executor that owns a job. The submitting CLI registers it
@@ -515,17 +385,9 @@ impl Store {
         )
     }
 
-    /// Records that the command started in process group `pgid`.
     /// Records that the command started in process group `pgid`, with the
-    /// environment the executor added (design 10.5: kept in the job's
-    /// record).
-    pub fn set_started(
-        &mut self,
-        job: &str,
-        log_path: &str,
-        pgid: Option<i64>,
-        injected: Option<&str>,
-    ) -> Result<()> {
+    /// environment the executor added (design 10.5).
+    pub fn set_started(&mut self, job: &str, log_path: &str, pgid: Option<i64>) -> Result<()> {
         if self.job(job)?.is_some_and(|j| j.state == "running") {
             return Ok(());
         }
@@ -535,12 +397,12 @@ impl Store {
             "state = 'running', started_at = ?1, log_path = ?2, pgid = ?3",
             &[&at, &log_path, &pgid],
             "started",
-            injected,
+            None,
         )
     }
 
-    /// Records the main execution process result; the job may still be
-    /// running (design 5.5).
+    /// Records the main process result; the job may still be running
+    /// (design 5.4).
     pub fn set_main_result(&mut self, job: &str, code: i64) -> Result<()> {
         self.update_job(
             job,
@@ -563,20 +425,15 @@ impl Store {
         let at = now();
         self.update_job(
             job,
-            "state = ?1, exit_code = ?2, ended_at = ?3, merge_fingerprint = NULL",
+            "state = ?1, exit_code = ?2, ended_at = ?3",
             &[&state, &exit_code, &at],
             state,
             exit_code.map(|c| c.to_string()).as_deref(),
-        )?;
-        self.conn.execute(
-            "DELETE FROM budget_records WHERE owner_kind = 'job' AND owner_id = ?1",
-            params![job],
-        )?;
-        Ok(())
+        )
     }
 
     /// Marks a job whose executor is gone while its processes still run
-    /// (design 7.3 ⑦). It keeps its lease until they exit.
+    /// (design 7.1). It keeps its reservation until they exit.
     pub fn await_takeover(&mut self, job: &str) -> Result<()> {
         self.update_job(
             job,
@@ -587,146 +444,42 @@ impl Store {
         )
     }
 
-    /// Stores summaries and keeps each job's peak private memory and CPU
-    /// time, in one transaction.
-    pub fn record_samples(&mut self, samples: &[JobSample]) -> Result<()> {
+    /// Keeps each job's measured peak private memory, and raises the
+    /// reservation of a job holding a lease to it (design 9).
+    pub fn record_peaks(&mut self, peaks: &[(String, u64)]) -> Result<()> {
         let tx = self.conn.transaction()?;
-        let at = now();
-        for s in samples {
+        for (job, peak) in peaks {
             tx.execute(
-                "INSERT INTO job_samples (job_id, at, private_resident, private_total, cpu_seconds, disk_read, disk_write)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![s.job, at, s.private_resident as i64, s.private_total as i64, s.cpu_seconds, s.disk_read as i64, s.disk_write as i64],
-            )?;
-            tx.execute(
-                "UPDATE jobs SET peak_private = MAX(COALESCE(peak_private, 0), ?2), cpu_seconds = MAX(COALESCE(cpu_seconds, 0), ?3)
-                 WHERE id = ?1",
-                params![s.job, s.peak_private_total as i64, s.cpu_seconds],
+                &format!(
+                    "UPDATE jobs SET peak_private = MAX(COALESCE(peak_private, 0), ?2),
+                     reserved_private = CASE WHEN state IN ({}) THEN MAX(reserved_private, ?2) ELSE reserved_private END
+                     WHERE id = ?1",
+                    sched::in_list(HELD)
+                ),
+                params![job, *peak as i64],
             )?;
         }
         tx.commit()?;
         Ok(())
     }
 
-    /// Records the usage an executor reports at the end. CPU time is exact
-    /// for processes that were waited for. The largest resident size also
+    /// The largest resident size an executor reports at the end. It also
     /// counts shared and file pages, so it only fills in for a job too short
-    /// to be sampled, as an upper bound.
-    pub fn record_exit_usage(
-        &mut self,
-        job: &str,
-        cpu_seconds: f64,
-        max_rss: Option<i64>,
-    ) -> Result<()> {
+    /// to be sampled, as an upper bound (design 8.3).
+    pub fn record_exit_usage(&mut self, job: &str, max_rss: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE jobs SET cpu_seconds = MAX(COALESCE(cpu_seconds, 0), ?2),
-                             peak_private = COALESCE(peak_private, ?3)
-             WHERE id = ?1",
-            params![job, cpu_seconds, max_rss],
+            "UPDATE jobs SET peak_private = COALESCE(peak_private, ?2) WHERE id = ?1",
+            params![job, max_rss],
         )?;
         Ok(())
     }
 
-    /// Starts counting awake time in `kind` (frozen or throttled), if not
-    /// already counting. Readings are only comparable within one boot.
-    pub fn open_interval(
-        &mut self,
-        job: &str,
-        kind: &str,
-        awake_ns: i64,
-        boot: &str,
-        instance: &str,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO time_intervals (job_id, kind, open_since_awake_ns, open_state, boot_id, daemon_instance)
-             VALUES (?1, ?2, ?3, 'open', ?4, ?5)
-             ON CONFLICT (job_id, kind) DO UPDATE SET
-                 open_since_awake_ns = excluded.open_since_awake_ns, open_state = 'open',
-                 boot_id = excluded.boot_id, daemon_instance = excluded.daemon_instance
-             WHERE open_since_awake_ns IS NULL",
-            params![job, kind, awake_ns, boot, instance],
-        )?;
-        Ok(())
-    }
-
-    /// Stops counting and adds the open part to the settled total. A part
-    /// opened in another boot cannot be measured and marks the total as
-    /// uncertain instead of being dropped silently.
-    pub fn close_interval(
-        &mut self,
-        job: &str,
-        kind: &str,
-        awake_ns: i64,
-        boot: &str,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE time_intervals SET
-                 settled_awake_ns = settled_awake_ns
-                     + CASE WHEN boot_id = ?4 THEN MAX(0, ?3 - open_since_awake_ns) ELSE 0 END,
-                 uncertain = uncertain OR boot_id IS NOT ?4,
-                 open_since_awake_ns = NULL, open_state = NULL
-             WHERE job_id = ?1 AND kind = ?2 AND open_since_awake_ns IS NOT NULL",
-            params![job, kind, awake_ns, boot],
-        )?;
-        Ok(())
-    }
-
-    /// The settled total plus the open part, as of `awake_ns`.
-    pub fn interval_total(
-        &self,
-        job: &str,
-        kind: &str,
-        awake_ns: i64,
-        boot: &str,
-    ) -> Result<Option<IntervalTotal>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT settled_awake_ns
-                        + CASE WHEN open_since_awake_ns IS NOT NULL AND boot_id = ?4
-                               THEN MAX(0, ?3 - open_since_awake_ns) ELSE 0 END,
-                        uncertain OR (open_since_awake_ns IS NOT NULL AND boot_id IS NOT ?4)
-                 FROM time_intervals WHERE job_id = ?1 AND kind = ?2",
-                params![job, kind, awake_ns, boot],
-                |r| {
-                    Ok(IntervalTotal {
-                        awake_ns: r.get(0)?,
-                        uncertain: r.get(1)?,
-                    })
-                },
-            )
-            .optional()?)
-    }
-
-    /// At daemon start: open intervals from this boot keep counting under
-    /// the new daemon instance; those from an earlier boot are closed as
-    /// uncertain, since the clock they were read from restarted. Returns how
-    /// many were closed.
-    pub fn recover_intervals(&mut self, boot: &str, instance: &str) -> Result<usize> {
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE time_intervals SET daemon_instance = ?2
-             WHERE open_since_awake_ns IS NOT NULL AND boot_id = ?1",
-            params![boot, instance],
-        )?;
-        let closed = tx.execute(
-            "UPDATE time_intervals SET uncertain = 1, open_since_awake_ns = NULL, open_state = NULL
-             WHERE open_since_awake_ns IS NOT NULL AND boot_id IS NOT ?1",
-            params![boot],
-        )?;
-        tx.commit()?;
-        Ok(closed)
-    }
-
-    /// Jobs that have not reached a terminal state, with what recovery needs.
+    /// Jobs that have not ended, with what recovery needs.
     pub fn active_jobs(&self) -> Result<Vec<ActiveJob>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, state, executor_pid, executor_start, pgid, launcher_pid, launcher_start,
-                    main_exit_code,
+            "SELECT id, state, executor_pid, executor_start, pgid, launcher_pid, launcher_start, main_exit_code,
                     NOT EXISTS (SELECT 1 FROM submissions s WHERE s.job_id = jobs.id AND s.canceled = 0)
-             FROM jobs WHERE state NOT IN (
-                 'completed', 'start_failed', 'canceled', 'replaced',
-                 'externally_terminated', 'ended_unknown')",
+             FROM jobs WHERE state NOT IN ('completed', 'start_failed', 'canceled', 'ended_unknown')",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(ActiveJob {
@@ -743,8 +496,8 @@ impl Store {
     }
 
     fn update_submission(&mut self, id: &str, set: &str) -> Result<String> {
-        let tx = self.conn.transaction()?;
-        let job: String = tx
+        let job: String = self
+            .conn
             .query_row(
                 "SELECT job_id FROM submissions WHERE id = ?1",
                 params![id],
@@ -752,17 +505,16 @@ impl Store {
             )
             .optional()?
             .ok_or_else(|| no_submission(id))?;
-        tx.execute(
+        self.conn.execute(
             &format!("UPDATE submissions SET {set} WHERE id = ?1"),
             params![id],
         )?;
-        tx.commit()?;
         Ok(job)
     }
 
     /// Cancels a submission. Returns the job id. A job left with no
-    /// uncanceled submission ends here while still queued; once running,
-    /// its executor stops it.
+    /// uncanceled submission ends here while it waits; once running, its
+    /// executor stops it.
     pub fn cancel_submission(&mut self, id: &str) -> Result<String> {
         let job = self.update_submission(id, "canceled = 1")?;
         if self.cancel_requested(&job)?
@@ -777,35 +529,6 @@ impl Store {
 
     pub fn detach_submission(&mut self, id: &str) -> Result<String> {
         self.update_submission(id, "detached = 1")
-    }
-
-    /// Records that the submission's terminal state reached its caller.
-    pub fn mark_retrieved(&mut self, id: &str) -> Result<String> {
-        let row = self.submission(id)?.ok_or_else(|| no_submission(id))?;
-        if !is_terminal(&row.job_state) {
-            return Err(Conflict(format!(
-                "job {} is {}, not in a terminal state",
-                row.job, row.job_state
-            ))
-            .into());
-        }
-        self.update_submission(id, "final_retrieved = 1")
-    }
-
-    /// Finds the submission registered under a caller's request id.
-    pub fn submission_by_request(&self, request_id: &str) -> Result<Option<SubmissionRow>> {
-        let id: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT id FROM submissions WHERE request_id = ?1",
-                params![request_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        match id {
-            Some(id) => self.submission(&id),
-            None => Ok(None),
-        }
     }
 
     /// True when every submission of the job is canceled, so the job
@@ -824,12 +547,7 @@ impl Store {
 pub fn is_terminal(state: &str) -> bool {
     matches!(
         state,
-        "completed"
-            | "start_failed"
-            | "canceled"
-            | "replaced"
-            | "externally_terminated"
-            | "ended_unknown"
+        "completed" | "start_failed" | "canceled" | "ended_unknown"
     )
 }
 
@@ -837,142 +555,62 @@ pub fn is_terminal(state: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn sample(request_id: Option<&str>, command: &str) -> NewSubmission {
+    pub(crate) fn sample(command: &str) -> NewSubmission {
         NewSubmission {
             entry: Entry::Sh,
             command: command.into(),
             cwd: "/tmp/p".into(),
             project_root: "/tmp/p".into(),
             session_id: Some("sess".into()),
-            agent: Some("claude".into()),
-            invocation_key: None,
-            request_id: request_id.map(str::to_string),
-            sandbox_signature: None,
-            service: false,
-            options: serde_json::json!({}),
             launcher: None,
             plan: Plan::default(),
         }
     }
 
     #[test]
-    fn intervals_count_awake_time_and_flag_reboots() {
-        let mut store = Store::open_in_memory().unwrap();
-        let job = store.create_submission(&sample(None, "make")).unwrap().job;
-        let total = |s: &Store, now, boot| {
-            s.interval_total(&job, "frozen", now, boot)
-                .unwrap()
-                .unwrap()
-        };
-
-        store
-            .open_interval(&job, "frozen", 1_000, "b1", "d1")
-            .unwrap();
-        store
-            .open_interval(&job, "frozen", 1_500, "b1", "d1")
-            .unwrap(); // already open
-        assert_eq!(
-            total(&store, 3_000, "b1"),
-            IntervalTotal {
-                awake_ns: 2_000,
-                uncertain: false
-            }
-        );
-        store.close_interval(&job, "frozen", 4_000, "b1").unwrap();
-        assert_eq!(total(&store, 9_000, "b1").awake_ns, 3_000);
-
-        // A daemon restart in the same boot keeps counting.
-        store
-            .open_interval(&job, "frozen", 10_000, "b1", "d1")
-            .unwrap();
-        assert_eq!(store.recover_intervals("b1", "d2").unwrap(), 0);
-        store.close_interval(&job, "frozen", 11_000, "b1").unwrap();
-        assert_eq!(
-            total(&store, 0, "b1"),
-            IntervalTotal {
-                awake_ns: 4_000,
-                uncertain: false
-            }
-        );
-
-        // Across a reboot the open part is unknown: kept as uncertain.
-        store
-            .open_interval(&job, "frozen", 20_000, "b1", "d2")
-            .unwrap();
-        assert_eq!(
-            total(&store, 5, "b2"),
-            IntervalTotal {
-                awake_ns: 4_000,
-                uncertain: true
-            }
-        );
-        assert_eq!(store.recover_intervals("b2", "d3").unwrap(), 1);
-        assert_eq!(
-            total(&store, 5, "b2"),
-            IntervalTotal {
-                awake_ns: 4_000,
-                uncertain: true
-            }
-        );
-    }
-
-    #[test]
-    fn samples_keep_the_peak() {
-        let mut store = Store::open_in_memory().unwrap();
-        let job = store.create_submission(&sample(None, "make")).unwrap().job;
-        let s = |peak, cpu| JobSample {
-            job: job.clone(),
-            private_resident: 1,
-            private_total: 1,
-            peak_private_total: peak,
-            cpu_seconds: cpu,
-            disk_read: 0,
-            disk_write: 0,
-        };
-        store.record_samples(&[s(500, 1.0)]).unwrap();
-        store.record_samples(&[s(300, 2.5)]).unwrap();
-        let row = store.job(&job).unwrap().unwrap();
-        assert_eq!((row.peak_private, row.cpu_seconds), (Some(500), Some(2.5)));
-    }
-
-    #[test]
     fn creates_and_reads_back() {
         let mut store = Store::open_in_memory().unwrap();
-        let c = store
-            .create_submission(&sample(None, "cargo build"))
-            .unwrap();
-        assert_eq!(c.state, "queued");
+        let c = store.create_submission(&sample("cargo build")).unwrap();
         let jobs = store.list_jobs(&[], 10).unwrap();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].command, "cargo build");
-        assert_eq!(jobs[0].submissions, 1);
+        assert_eq!(
+            (
+                jobs[0].command.as_str(),
+                jobs[0].state.as_str(),
+                jobs[0].submissions
+            ),
+            ("cargo build", "queued", 1)
+        );
         let s = store.submission(&c.submission).unwrap().unwrap();
-        assert_eq!(s.job, c.job);
-        assert_eq!(s.job_state, "queued");
+        assert_eq!((s.job, s.job_state.as_str()), (c.job, "queued"));
         assert!(store.submission("s_missing").unwrap().is_none());
     }
 
     #[test]
-    fn request_id_is_idempotent_and_conflicts_on_different_command() {
+    fn peaks_only_grow() {
         let mut store = Store::open_in_memory().unwrap();
-        let a = store
-            .create_submission(&sample(Some("r1"), "make"))
-            .unwrap();
-        let b = store
-            .create_submission(&sample(Some("r1"), "make"))
-            .unwrap();
-        assert!(b.existing);
-        assert_eq!(a.submission, b.submission);
-        let err = store
-            .create_submission(&sample(Some("r1"), "make test"))
-            .unwrap_err();
-        assert!(err.downcast_ref::<RequestIdConflict>().is_some());
+        let job = store.create_submission(&sample("make")).unwrap().job;
+        store.set_executor(&job, 1, "t").unwrap();
+        store.admit(&job, 400, 1).unwrap();
+        store.record_peaks(&[(job.clone(), 500)]).unwrap();
+        store.record_peaks(&[(job.clone(), 300)]).unwrap();
+        store.record_exit_usage(&job, 900).unwrap();
+        assert_eq!(
+            store.job(&job).unwrap().unwrap().peak_private,
+            Some(500),
+            "a sampled peak is kept"
+        );
+        assert_eq!(
+            store.held_jobs().unwrap()[0].reserved_private,
+            500,
+            "the reservation follows the peak"
+        );
     }
 
     #[test]
     fn filters_by_state() {
         let mut store = Store::open_in_memory().unwrap();
-        store.create_submission(&sample(None, "a")).unwrap();
+        store.create_submission(&sample("a")).unwrap();
         assert_eq!(store.list_jobs(&["queued".into()], 10).unwrap().len(), 1);
         assert!(store.list_jobs(&["running".into()], 10).unwrap().is_empty());
     }
@@ -981,14 +619,17 @@ mod tests {
     fn survives_reopen_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ats.db");
-        let id = {
-            let mut store = Store::open(&path).unwrap();
-            store
-                .create_submission(&sample(None, "a"))
+        let id = Store::open(&path)
+            .unwrap()
+            .create_submission(&sample("a"))
+            .unwrap()
+            .submission;
+        assert!(
+            Store::open(&path)
                 .unwrap()
-                .submission
-        };
-        let store = Store::open(&path).unwrap();
-        assert!(store.submission(&id).unwrap().is_some());
+                .submission(&id)
+                .unwrap()
+                .is_some()
+        );
     }
 }

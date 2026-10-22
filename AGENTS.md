@@ -5,13 +5,17 @@ Agent Task Scheduler (`ats`) queues resource-heavy commands from AI agents and a
 ## Layout
 
 - `src/main.rs`: command-line entry point.
-- `src/daemon/`: daemon lifecycle and the single-instance lock.
+- `src/daemon/`: daemon lifecycle, the scheduling loop, the executor watch and the pressure response.
 - `src/api/`: the HTTP/JSON API, served on a unix socket and through the request-file channel (`src/channel.rs`).
 - `src/client.rs`: how commands reach the daemon.
+- `src/executor/`: the per-job process that waits for its lease and runs the command.
+- `src/recognize/`, `src/profile.rs`, `profiles/builtin.toml`: command recognition and tool profiles.
+- `src/sched/`: admission, prediction, locks and pressure as pure functions.
+- `src/sample/`: memory measurement.
 - `src/store/`: the SQLite store and its schema.
-- `api/openapi.yaml`: the API description shared by the CLI, hooks and the dashboard.
+- `api/openapi.yaml`: the API description shared by the CLI, executors and hooks.
 
-Platform-specific code goes behind small traits and `cfg(target_os = ...)` modules.
+ats runs on macOS only.
 
 ## Code
 
@@ -28,4 +32,4 @@ Run before every commit:
 scripts/check.sh
 ```
 
-It runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, plus the dashboard's tests and build once `web/` exists.
+It runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`.

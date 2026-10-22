@@ -1,14 +1,13 @@
 //! The daemon: one instance per user, serving the API on a unix socket and
 //! through the request-file channel.
 
-mod controller;
 mod lock;
 mod pressure;
 mod scheduler;
 mod supervisor;
 
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
 
@@ -16,17 +15,14 @@ use crate::api::{self, AppState};
 use crate::paths::Paths;
 use crate::procinfo;
 use crate::profile::Profiles;
-use crate::sample::{GroupUsage, JobRoot, Sampler};
-use crate::store::{self, Store};
-use crate::store::{HELD, JobSample};
+use crate::sample::{JobRoot, Sampler};
+use crate::store::{self, HELD, Store};
 
 /// How long leases wait after a restart for running executors to reconnect.
 /// They poll every half second, so this covers slow starts.
 const RECONNECT_GRACE: Duration = Duration::from_secs(10);
 const SWEEP_EVERY: Duration = Duration::from_secs(1);
 const SAMPLE_EVERY: Duration = Duration::from_secs(1);
-/// Summaries are stored every this many samples (design 9.2: 5 seconds).
-const SUMMARY_EVERY: u64 = 5;
 
 /// Runs the daemon until `shutdown` completes.
 pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
@@ -34,16 +30,8 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
     create_private_dir(&paths.logs)?;
     let _lock = lock::acquire(&paths.lock)?;
 
-    let mut store = Store::open(&paths.db)?;
+    let store = Store::open(&paths.db)?;
     let instance = crate::ids::new("d");
-    let boot = crate::sample::boot_id().unwrap_or_default();
-    let closed = store.recover_intervals(&boot, &instance)?;
-    if closed > 0 {
-        tracing::warn!(
-            closed,
-            "time intervals from an earlier boot marked uncertain"
-        );
-    }
     let profiles = Profiles::load(Some(&paths.profiles))?;
     let config = crate::config::Config::load(&paths)?;
     let state = AppState::new(store, store::now(), instance)
@@ -82,20 +70,9 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
     };
     let sampling = {
         let state = state.clone();
-        std::thread::spawn(move || {
-            let sampler = Sampler::new(&state.profiles);
-            sample_loop(&state, sampler)
-        })
+        std::thread::spawn(move || sample_loop(&state))
     };
     let scheduling = tokio::spawn(scheduler::run(state.clone()));
-    let controlling = {
-        let state = state.clone();
-        std::thread::spawn(move || controller::run(&state))
-    };
-    let responding = {
-        let state = state.clone();
-        std::thread::spawn(move || pressure::run(&state))
-    };
     tracing::info!(socket = %paths.socket.display(), requests = %paths.requests.display(), "ats daemon started");
 
     let stopping = state.clone();
@@ -109,84 +86,53 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
     scheduling.abort();
     channel.abort();
     let _ = sampling.join();
-    let _ = controlling.join();
-    let _ = responding.join();
     let _ = std::fs::remove_file(&paths.socket);
     tracing::info!("ats daemon stopped");
     served.context("serving the API")
 }
 
-/// Samples every second until the daemon stops, publishing the snapshot
-/// and storing summaries every few seconds. Runs on its own thread: a
+/// Samples every second until the daemon stops: publishes the snapshot,
+/// records each job's peak memory when it grows (which also raises its
+/// reservation), and runs the pressure response. Runs on its own thread: a
 /// sample makes many system calls.
-fn sample_loop(state: &AppState, mut sampler: Sampler) {
-    let mut ticks = 0u64;
-    let mut previous: BTreeMap<String, GroupUsage> = BTreeMap::new();
+fn sample_loop(state: &AppState) {
+    let mut sampler = Sampler::default();
+    let mut response = pressure::Response::default();
+    let mut recorded: HashMap<String, u64> = HashMap::new();
     while !state.stopping() {
-        let jobs = match state.store().active_jobs() {
-            Ok(jobs) => jobs,
-            Err(e) => {
-                tracing::error!("listing jobs to sample: {e:#}");
-                Vec::new()
-            }
-        };
+        let jobs = state.store().active_jobs().unwrap_or_else(|e| {
+            tracing::error!("listing jobs to sample: {e:#}");
+            Vec::new()
+        });
         let roots: Vec<JobRoot> = jobs
             .iter()
             .filter(|j| HELD.contains(&j.state.as_str()))
-            .map(|j| {
+            .map(|j| JobRoot {
+                id: j.id.clone(),
                 // A dead executor's id may belong to another process now.
-                let executor = j
+                executor: j
                     .executor
                     .as_ref()
-                    .filter(|(pid, start)| procinfo::alive(*pid as i32, start));
-                JobRoot {
-                    id: j.id.clone(),
-                    executor: executor.map(|(pid, _)| *pid as i32),
-                    pgid: j.pgid.map(|g| g as i32),
-                    since: j
-                        .executor
-                        .as_ref()
-                        .and_then(|(_, start)| start.parse().ok())
-                        .unwrap_or(0.0),
-                }
+                    .filter(|(pid, start)| procinfo::alive(*pid as i32, start))
+                    .map(|(pid, _)| *pid as i32),
+                pgid: j.pgid.map(|g| g as i32),
             })
             .collect();
         let snapshot = sampler.sample(&roots);
-        // Every few seconds, and once more with the last reading when a
-        // job's processes are gone, so short jobs leave a summary too.
-        let due = ticks.is_multiple_of(SUMMARY_EVERY);
-        let summaries: Vec<JobSample> = previous
+        let grown: Vec<(String, u64)> = snapshot
+            .jobs
             .iter()
-            .filter(|(job, u)| {
-                !u.processes.is_empty()
-                    && snapshot
-                        .jobs
-                        .get(*job)
-                        .is_none_or(|now| now.processes.is_empty())
-            })
-            .chain(
-                snapshot
-                    .jobs
-                    .iter()
-                    .filter(|(_, u)| due && !u.processes.is_empty()),
-            )
-            .map(|(job, u)| JobSample {
-                job: job.clone(),
-                private_resident: u.private_resident,
-                private_total: u.private_total,
-                peak_private_total: u.peak_private_total,
-                cpu_seconds: u.cpu_seconds,
-                disk_read: u.disk_read,
-                disk_write: u.disk_write,
-            })
+            .filter(|(job, u)| u.peak_private_total > recorded.get(*job).copied().unwrap_or(0))
+            .map(|(job, u)| (job.clone(), u.peak_private_total))
             .collect();
-        if !summaries.is_empty()
-            && let Err(e) = state.store().record_samples(&summaries)
-        {
-            tracing::error!("storing samples: {e:#}");
+        if !grown.is_empty() {
+            match state.store().record_peaks(&grown) {
+                Ok(()) => recorded.extend(grown),
+                Err(e) => tracing::error!("recording peaks: {e:#}"),
+            }
         }
-        previous = snapshot.jobs.clone();
-        ticks += 1;
+        recorded.retain(|job, _| snapshot.jobs.contains_key(job));
+        response.update(state, &snapshot);
         *state.measurements.lock().expect("measurements lock") = snapshot;
         std::thread::sleep(SAMPLE_EVERY);
     }

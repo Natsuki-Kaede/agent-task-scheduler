@@ -6,8 +6,6 @@ fn cap(used: u64) -> Capacity {
     Capacity {
         memory: 16 * G,
         used,
-        cores: 8.0,
-        cpu_target: 1.25,
     }
 }
 
@@ -16,17 +14,12 @@ fn job(id: &str, age: f64, mem: u64) -> Waiting {
         id: id.into(),
         age,
         reserved: mem,
-        extra: 0,
-        cores: 1.0,
         seconds: None,
         locks: Vec::new(),
         deps: Vec::new(),
         now: false,
         ready: true,
         awaited: false,
-        session_recency: 0.0,
-        urgency: 0,
-        pinned: None,
     }
 }
 
@@ -35,34 +28,25 @@ fn held(id: &str, reserved: u64, resident: u64) -> Held {
         id: id.into(),
         reserved,
         resident,
-        extra: 0,
-        cores: 1.0,
         locks: Vec::new(),
         ends_in: None,
     }
 }
 
-fn run(capacity: &Capacity, held: &[Held], waiting: &[Waiting]) -> Vec<(String, Verdict)> {
-    run_with(capacity, held, waiting, 0, Some(10.0))
+fn round(capacity: &Capacity, held: &[Held], waiting: &[Waiting]) -> Round<'static> {
+    // Leaked so tests can build rounds inline; tiny and test-only.
+    Round {
+        capacity: Box::leak(Box::new(capacity.clone())),
+        held: Box::leak(held.to_vec().into_boxed_slice()),
+        waiting: Box::leak(waiting.to_vec().into_boxed_slice()),
+        pressure: false,
+        settling: false,
+        admitting: true,
+    }
 }
 
-fn run_with(
-    capacity: &Capacity,
-    held: &[Held],
-    waiting: &[Waiting],
-    pressure: u8,
-    since: Option<f64>,
-) -> Vec<(String, Verdict)> {
-    let settings = Settings::default();
-    decide(&Round {
-        capacity,
-        held,
-        waiting,
-        pressure,
-        since_admission: since,
-        admitting: true,
-        settings: &settings,
-    })
+fn run(capacity: &Capacity, held: &[Held], waiting: &[Waiting]) -> Vec<(String, Verdict)> {
+    decide(&round(capacity, held, waiting))
 }
 
 fn admitted(out: &[(String, Verdict)]) -> Vec<&str> {
@@ -82,20 +66,18 @@ fn path(p: &str) -> Lock {
 
 #[test]
 fn headroom_follows_the_formula() {
-    // H = C − U − Σ max(0, R − M) − Σ B
-    let mut h = held("a", 4 * G, G);
-    h.extra = G;
-    let mut over = held("b", G, 2 * G); // using more than reserved: nothing pending
-    over.extra = 0;
+    // H = C − U − Σ max(0, R − M)
+    let a = held("a", 4 * G, G);
+    let over = held("b", G, 2 * G); // using more than reserved: nothing pending
     assert_eq!(
-        headroom(&cap(6 * G), &[h, over]),
-        (16 - 6 - 3 - 1) as i64 * G as i64
+        headroom(&cap(6 * G), &[a, over]),
+        (16 - 6 - 3) as i64 * G as i64
     );
 }
 
 #[test]
 fn admits_by_memory_in_order() {
-    // 16G budget, 8G used: 8G free.
+    // 8G free: two 3G jobs fit; the round then closes as tight.
     let out = run(
         &cap(8 * G),
         &[],
@@ -106,11 +88,10 @@ fn admits_by_memory_in_order() {
         ],
     );
     assert_eq!(admitted(&out), ["a", "b"]);
-    // 2G left is tight: the round closes.
     assert_eq!(
         verdict(&out, "c"),
         &Verdict::Wait {
-            reason: Reason::Interval
+            reason: Reason::Settling
         }
     );
     let out = run(&cap(14 * G), &[], &[job("a", 30.0, 3 * G)]);
@@ -126,59 +107,41 @@ fn admits_by_memory_in_order() {
 }
 
 #[test]
-fn a_tight_round_admits_one() {
-    // 4G free: after one 2G admission headroom is below 20% of 16G.
-    let out = run(
-        &cap(12 * G),
-        &[],
-        &[job("a", 30.0, 2 * G), job("b", 20.0, G)],
-    );
-    assert_eq!(admitted(&out), ["a"]);
-    assert_eq!(
-        verdict(&out, "b"),
-        &Verdict::Wait {
-            reason: Reason::Interval
-        }
-    );
+fn many_small_jobs_run_together() {
+    // CPU is not an admission constraint: ten 512M jobs all start.
+    let waiting: Vec<Waiting> = (0..10)
+        .map(|i| job(&format!("j{i}"), 10.0 - i as f64, G / 2))
+        .collect();
+    assert_eq!(admitted(&run(&cap(2 * G), &[], &waiting)).len(), 10);
 }
 
 #[test]
-fn waits_for_the_interval_and_stops_under_pressure() {
+fn pressure_settling_and_recovery_hold_admission() {
     let waiting = [job("a", 30.0, G)];
-    let out = run_with(&cap(0), &[], &waiting, 0, Some(1.0));
+    let mut r = round(&cap(0), &[], &waiting);
+    r.pressure = true;
     assert_eq!(
-        verdict(&out, "a"),
+        verdict(&decide(&r), "a"),
         &Verdict::Wait {
-            reason: Reason::Interval
+            reason: Reason::Pressure
         }
     );
-    let out = run_with(&cap(0), &[], &waiting, 1, None);
+    r.pressure = false;
+    r.settling = true;
     assert_eq!(
-        verdict(&out, "a"),
+        verdict(&decide(&r), "a"),
         &Verdict::Wait {
-            reason: Reason::Pressure { level: 1 }
+            reason: Reason::Settling
         }
     );
-}
-
-#[test]
-fn cpu_is_soft() {
-    let mut big = job("a", 30.0, G);
-    big.cores = 20.0;
-    // An idle machine takes it anyway.
+    r.settling = false;
+    r.admitting = false;
     assert_eq!(
-        admitted(&run(&cap(0), &[], std::slice::from_ref(&big))),
-        ["a"]
-    );
-    // With 8 cores busy (target 10), it waits.
-    let busy: Vec<Held> = (0..8).map(|i| held(&format!("h{i}"), 0, 0)).collect();
-    let out = run(&cap(0), &busy, &[big]);
-    assert!(matches!(
-        verdict(&out, "a"),
-        Verdict::Wait {
-            reason: Reason::Cpu { .. }
+        verdict(&decide(&r), "a"),
+        &Verdict::Wait {
+            reason: Reason::Recovering
         }
-    ));
+    );
 }
 
 #[test]
@@ -235,11 +198,14 @@ fn now_skips_admission_but_not_conflicts() {
     b.locks = vec![path("/repo")];
     let mut h = held("h", G, G);
     h.locks = vec![path("/repo")];
-    let out = run_with(&cap(15 * G), &[h], &[a, b], 2, Some(0.0));
+    let mut r = round(&cap(15 * G), &[h], &[a, b]);
+    r.pressure = true;
+    r.settling = true;
+    let out = decide(&r);
     assert_eq!(
         admitted(&out),
         ["a"],
-        "admitted over budget, under pressure, inside the interval"
+        "over budget, under pressure, while settling"
     );
     assert!(matches!(
         verdict(&out, "b"),
@@ -262,7 +228,7 @@ fn too_big_for_the_machine() {
 }
 
 #[test]
-fn not_ready_or_recovering() {
+fn not_ready() {
     let mut a = job("a", 1.0, G);
     a.ready = false;
     assert_eq!(
@@ -271,65 +237,17 @@ fn not_ready_or_recovering() {
             reason: Reason::NoExecutor
         }
     );
-    let settings = Settings::default();
-    let waiting = [job("b", 1.0, G)];
-    let out = decide(&Round {
-        capacity: &cap(0),
-        held: &[],
-        waiting: &waiting,
-        pressure: 0,
-        since_admission: None,
-        admitting: false,
-        settings: &settings,
-    });
-    assert_eq!(
-        verdict(&out, "b"),
-        &Verdict::Wait {
-            reason: Reason::Recovering
-        }
-    );
 }
 
 #[test]
-fn ordering_signals() {
-    let s = Settings::default();
-    let ids = |w: &[Waiting]| {
-        order(w, &s)
-            .iter()
-            .map(|w| w.id.clone())
-            .collect::<Vec<_>>()
-    };
-    let mut awaited = job("awaited", 10.0, G);
+fn awaited_jobs_go_first_then_oldest() {
+    let mut awaited = job("awaited", 1.0, G);
     awaited.awaited = true;
-    let mut urgent = job("urgent", 10.0, G);
-    urgent.urgency = 5; // capped at one step
-    let mut recent = job("recent", 10.0, G);
-    recent.session_recency = 1.0;
-    let old = job("old", 100.0, G);
-    let mut low = job("low", 50.0, G);
-    low.urgency = -1;
-    assert_eq!(
-        ids(&[low, recent, old, urgent, awaited]),
-        ["awaited", "old", "recent", "urgent", "low"]
-    );
-
-    // Starvation: past ten minutes, waiting counts double.
-    let mut fresh_awaited = job("fresh", 0.0, G);
-    fresh_awaited.awaited = true;
-    let starving = job("starving", 650.0, G);
-    let mut urgent_newer = job("urgent", 700.0, G);
-    urgent_newer.urgency = 1;
-    assert_eq!(
-        ids(&[fresh_awaited, starving, urgent_newer]),
-        ["urgent", "starving", "fresh"]
-    );
-
-    // Pinned jobs go first, in pin order.
-    let mut p2 = job("p2", 0.0, G);
-    p2.pinned = Some(2);
-    let mut p1 = job("p1", 0.0, G);
-    p1.pinned = Some(1);
-    assert_eq!(ids(&[job("x", 999.0, G), p2, p1]), ["p1", "p2", "x"]);
+    let ids: Vec<String> = order(&[job("new", 1.0, G), job("old", 100.0, G), awaited])
+        .iter()
+        .map(|w| w.id.clone())
+        .collect();
+    assert_eq!(ids, ["awaited", "old", "new"]);
 }
 
 #[test]
@@ -365,10 +283,10 @@ fn backfills_only_what_does_not_delay_the_head() {
 
 #[test]
 fn backfill_never_takes_the_heads_lock() {
-    let mut head = job("head", 50.0, 20 * G / 2);
+    let mut head = job("head", 50.0, 10 * G);
     head.locks = vec![path("/repo")];
     let mut sneaky = job("sneaky", 40.0, 0);
-    sneaky.cores = 0.0;
+    sneaky.seconds = Some(1.0);
     sneaky.locks = vec![path("/repo/target")];
     let out = run(&cap(8 * G), &[], &[head, sneaky]);
     assert_eq!(

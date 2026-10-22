@@ -1,5 +1,5 @@
 //! Client side of the daemon API: the unix socket first, then the
-//! request-file channel when the socket cannot be reached (design 6.8).
+//! request-file channel when the socket cannot be reached (design 4).
 
 use std::io::ErrorKind;
 use std::time::Duration;

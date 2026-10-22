@@ -1,4 +1,4 @@
-//! Command recognition (design 6.3, 8.1): the structure of a command line,
+//! Command recognition (design 6.1, 8.1): the structure of a command line,
 //! each command in it with wrappers removed and scripts expanded, its
 //! profile, and whether the whole line is light enough to skip the queue.
 //! Recognition only informs prediction and the light check; it never
@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::profile::{Class, Profiles, Writes, positionals};
 use shell::{Ast, Redirect, Sep, Simple, Word};
 
-/// How the commands of a line overlap in time (design 8.1 ②). This is an
+/// How the commands of a line overlap in time (design 8.1). This is an
 /// assumption for estimates; resources are held until the job's processes
 /// have all exited.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -56,7 +56,7 @@ pub struct Analysis {
     pub unclear: Option<String>,
     pub segments: Vec<Segment>,
     /// Every command is recognized, light and writes nothing: the line can
-    /// run without queueing (design 6.3).
+    /// run without queueing (design 6.1).
     pub light: bool,
     pub interactive: bool,
 }
@@ -67,7 +67,7 @@ const MAX_DEPTH: usize = 8;
 
 pub struct Recognizer<'a> {
     profiles: &'a Profiles,
-    /// Extra wrapper programs from the configuration (design 8.1 ①).
+    /// Extra wrapper programs from the configuration (design 8.1).
     wrappers: &'a [String],
 }
 
@@ -300,7 +300,7 @@ impl Run<'_, '_> {
 
     /// `npm run x`, `npm test`, `pnpm run x`, `yarn run x`, `bun run x`:
     /// the script from the nearest package.json, with npm's pre and post
-    /// scripts (design 8.1 ③).
+    /// scripts (design 8.1).
     fn package_script(
         &mut self,
         argv: &[String],
@@ -365,7 +365,7 @@ impl Run<'_, '_> {
             let s = &mut self.segments[segment];
             s.profile = None;
             s.class = None;
-            s.writes = Writes::Project;
+            s.writes = Writes::None;
             s.interactive = false;
             s.service = false;
         }
@@ -408,7 +408,7 @@ impl Run<'_, '_> {
                     subcommand,
                     profile: p.map(|p| p.name.clone()),
                     class: p.map(|p| p.class),
-                    writes: p.map_or(Writes::Project, |p| p.writes),
+                    writes: p.map_or(Writes::None, |p| p.writes),
                     redirect_writes,
                     interactive: p.is_some_and(|p| {
                         p.interactive || (p.interactive_without_args && argv.len() == 1)
@@ -425,7 +425,7 @@ impl Run<'_, '_> {
     }
 
     /// A light command reading a large file, or files it cannot size, is
-    /// medium (design 6.3: reading a very large file is not light).
+    /// medium (design 8.2: reading a very large file is not light).
     fn check_inputs(&mut self, segment: usize, limit: u64, words: &[Word], redirects: &[Redirect]) {
         let args = words[1..]
             .iter()

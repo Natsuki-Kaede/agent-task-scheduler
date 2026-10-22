@@ -7,8 +7,6 @@ mod logwriter;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -22,21 +20,21 @@ use crate::runspec::RunSpec;
 use logwriter::CappedLog;
 
 /// Per-stream log cap: a 24 MB head on disk plus a 1 MB tail kept in memory,
-/// so one job's two streams stay within 50 MB (design 13).
+/// so one job's two streams stay within 50 MB (design 7.2).
 const LOG_HEAD: usize = 24 << 20;
 const LOG_TAIL: usize = 1 << 20;
 const CONTROL_POLL: Duration = Duration::from_millis(500);
 const GROUP_POLL: Duration = Duration::from_millis(250);
 const TERM_GRACE: Duration = Duration::from_secs(5);
 
-/// Environment variable that marks processes belonging to a job (design 9.1)
-/// and tells hooks and shims not to queue nested commands (design 6.5).
+/// Tells hooks and `ats run` inside a job not to queue nested commands
+/// (design 6.3).
 pub const JOB_ENV: &str = "ATS_JOB_ID";
 
 const RETRY: Duration = Duration::from_millis(500);
 
 /// Sends a report until the daemon answers it; the daemon may be
-/// restarting, and the job carries on meanwhile (design 7.3 ⑥). Reports are
+/// restarting, and the job carries on meanwhile (design 7.1). Reports are
 /// idempotent, so a repeat after a lost answer is harmless.
 async fn report(paths: &Paths, path: &str, body: serde_json::Value) -> client::Answer {
     loop {
@@ -95,7 +93,7 @@ async fn acquire_lease(paths: &Paths, job: &str) -> Result<Option<serde_json::Va
 }
 
 /// Chooses the log directory: the data directory when writable, else the
-/// temporary directory, which sandboxed agents can write (design 6.8).
+/// temporary directory, which sandboxed agents can write (design 4).
 fn log_dir(paths: &Paths, job: &str) -> Result<PathBuf> {
     let preferred = paths.logs.join(job);
     if std::fs::create_dir_all(&preferred).is_ok() {
@@ -139,7 +137,6 @@ pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Resu
     let mut cmd = tokio::process::Command::from(spec.command());
     // Parallelism from the lease (design 10.5); what the submitter set
     // itself stays.
-    let mut injected = serde_json::Map::new();
     if let Some(n) = terms["parallelism"].as_u64() {
         for var in terms["env"]
             .as_array()
@@ -149,7 +146,6 @@ pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Resu
         {
             if std::env::var_os(var).is_none() {
                 cmd.env(var, n.to_string());
-                injected.insert(var.into(), json!(n.to_string()));
             }
         }
     }
@@ -163,25 +159,13 @@ pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Resu
                 &job,
                 tokens as u32,
             )?;
-            let flags = pool.makeflags(tokens as u32);
-            cmd.env("MAKEFLAGS", &flags);
-            injected.insert("MAKEFLAGS".into(), json!(flags));
-            Some((Arc::new(pool), tokens as u32))
+            cmd.env("MAKEFLAGS", pool.makeflags(tokens as u32));
+            Some(pool)
         }
         _ => None,
     };
-    let regulating = Arc::new(AtomicBool::new(false));
-    let regulator = pool.clone().map(|(pool, tokens)| {
-        let done = regulating.clone();
-        std::thread::spawn(move || pool.regulate(tokens, &done))
-    });
-    let target = pool.as_ref().map(|(p, tokens)| (p.target(), *tokens));
-    let result = run_command(&paths, &job, cmd, &cwd, &dir, injected, target).await;
-    regulating.store(true, Ordering::Relaxed);
-    if let (Some(r), Some((pool, _))) = (regulator, &pool) {
-        pool.finish();
-        let _ = r.join();
-    }
+    let result = run_command(&paths, &job, cmd, &cwd, &dir).await;
+    drop(pool);
     result
 }
 
@@ -192,8 +176,6 @@ async fn run_command(
     mut cmd: tokio::process::Command,
     cwd: &Path,
     dir: &Path,
-    injected: serde_json::Map<String, serde_json::Value>,
-    target: Option<(Arc<AtomicU32>, u32)>,
 ) -> Result<()> {
     let (paths, job) = (paths.clone(), job.to_string());
     cmd.current_dir(cwd)
@@ -228,7 +210,7 @@ async fn run_command(
     post(
         &paths,
         &format!("/v1/jobs/{job}/started"),
-        json!({ "log_path": dir, "pgid": pgid, "env": injected }),
+        json!({ "log_path": dir, "pgid": pgid }),
     )
     .await?;
 
@@ -244,7 +226,7 @@ async fn run_command(
     let mut canceled = false;
     let main = tokio::select! {
         status = child.wait() => Some(exit_code(status?)),
-        () = wait_for_cancel(&paths, &job, target.as_ref()) => { canceled = true; None }
+        () = wait_for_cancel(&paths, &job) => { canceled = true; None }
     };
     if canceled {
         stop_group(pgid).await;
@@ -262,7 +244,7 @@ async fn run_command(
     let main = main.expect("main result");
 
     // The main execution process result needs the process to have exited
-    // and both output streams to have reached the end (design 5.5).
+    // and both output streams to have reached the end (design 3).
     out.await??;
     err.await??;
     post(
@@ -272,11 +254,11 @@ async fn run_command(
     )
     .await?;
 
-    // The job ends when every process in its group has exited (design 7.3).
+    // The job ends when every process in its group has exited (design 3).
     while procinfo::group_alive(pgid) {
         tokio::select! {
             () = tokio::time::sleep(GROUP_POLL) => {}
-            () = wait_for_cancel(&paths, &job, target.as_ref()) => {
+            () = wait_for_cancel(&paths, &job) => {
                 stop_group(pgid).await;
                 post(&paths, &format!("/v1/jobs/{job}/finished"), ended("canceled", Some(main))).await?;
                 return Ok(());
@@ -292,32 +274,19 @@ async fn run_command(
     Ok(())
 }
 
-/// The end report, with the usage of every process the command waited for:
-/// sampling misses commands shorter than its one-second interval
-/// (design 9.2).
+/// The end report, with the largest resident size of any process the
+/// command waited for (bytes on macOS): sampling misses commands shorter
+/// than its interval (design 8.3).
 fn ended(state: &str, exit_code: Option<i64>) -> serde_json::Value {
     // SAFETY: getrusage fills the struct.
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
     // SAFETY: as above.
     unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) };
-    let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
-    // ru_maxrss is in bytes on macOS and kilobytes on Linux.
-    let max_rss = if cfg!(target_os = "macos") {
-        ru.ru_maxrss
-    } else {
-        ru.ru_maxrss * 1024
-    };
-    json!({
-        "state": state,
-        "exit_code": exit_code,
-        "cpu_seconds": secs(ru.ru_utime) + secs(ru.ru_stime),
-        "max_rss": max_rss,
-    })
+    json!({ "state": state, "exit_code": exit_code, "max_rss": ru.ru_maxrss })
 }
 
-/// Polls the daemon's control for a cancel, and follows its jobserver
-/// target (`tokens`, or the leased number when unset).
-async fn wait_for_cancel(paths: &Paths, job: &str, target: Option<&(Arc<AtomicU32>, u32)>) {
+/// Polls the daemon until the job is canceled.
+async fn wait_for_cancel(paths: &Paths, job: &str) {
     loop {
         tokio::time::sleep(CONTROL_POLL).await;
         let Ok((answer, _)) =
@@ -328,17 +297,11 @@ async fn wait_for_cancel(paths: &Paths, job: &str, target: Option<&(Arc<AtomicU3
         if answer.body["cancel"] == true {
             return;
         }
-        if let Some((t, leased)) = target {
-            let want = answer.body["tokens"].as_u64().map_or(*leased, |n| n as u32);
-            t.store(want, Ordering::Relaxed);
-        }
     }
 }
 
 async fn stop_group(pgid: i32) {
     procinfo::signal_group(pgid, libc::SIGTERM);
-    // A frozen process handles SIGTERM only once resumed.
-    procinfo::signal_group(pgid, libc::SIGCONT);
     let deadline = tokio::time::Instant::now() + TERM_GRACE;
     while procinfo::group_alive(pgid) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(GROUP_POLL).await;

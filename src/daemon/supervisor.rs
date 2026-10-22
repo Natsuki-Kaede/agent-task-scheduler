@@ -1,8 +1,8 @@
-//! Watches executors and settles jobs whose executor is gone (design 7.3
-//! ⑦–⑨). A command runs only after its lease is committed, so a job that
-//! never got a lease is known not to have run; after the lease, a job keeps
-//! it while any of its processes live, and its exit code is unknown unless
-//! the executor reported the main result.
+//! Watches executors and settles jobs whose executor is gone (design 7.1).
+//! A command runs only after its lease is committed, so a job that never
+//! got a lease is known not to have run; after the lease, a job keeps it
+//! while its process group lives, and its exit code is unknown unless the
+//! executor reported the main result.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -10,7 +10,6 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::api::AppState;
-use crate::executor::JOB_ENV;
 use crate::procinfo;
 use crate::store::{ActiveJob, Conflict};
 use crate::timing;
@@ -19,9 +18,7 @@ use crate::timing;
 pub trait Processes {
     fn alive(&self, pid: i64, start: &str) -> bool;
     fn group_alive(&self, pgid: i64) -> bool;
-    /// Whether any process carries the job's environment marker.
-    fn marked(&self, job: &str) -> bool;
-    /// Asks the job's processes to end, or kills them when `force`.
+    /// Asks the job's process group to end, or kills it when `force`.
     fn terminate(&self, job: &ActiveJob, force: bool);
 }
 
@@ -36,24 +33,9 @@ impl Processes for System {
         procinfo::group_alive(pgid as i32)
     }
 
-    fn marked(&self, job: &str) -> bool {
-        !procinfo::with_env(JOB_ENV, job).is_empty()
-    }
-
     fn terminate(&self, job: &ActiveJob, force: bool) {
-        let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
-        let pids = procinfo::with_env(JOB_ENV, &job.id);
         if let Some(g) = job.pgid {
-            procinfo::signal_group(g as i32, sig);
-            // A frozen process handles SIGTERM only once resumed.
-            procinfo::signal_group(g as i32, libc::SIGCONT);
-        }
-        for pid in pids {
-            // SAFETY: signals a process carrying this job's marker.
-            unsafe {
-                libc::kill(pid, sig);
-                libc::kill(pid, libc::SIGCONT);
-            }
+            procinfo::signal_group(g as i32, if force { libc::SIGKILL } else { libc::SIGTERM });
         }
     }
 }
@@ -86,8 +68,7 @@ pub fn check(job: &ActiveJob, procs: &impl Processes) -> Option<Action> {
             job.executor.is_some() || (job.launcher.is_some() && !alive(&job.launcher, procs));
         return starter_gone.then_some(Action::Finish("start_failed", None));
     }
-    let running = job.pgid.is_some_and(|g| procs.group_alive(g)) || procs.marked(&job.id);
-    if running {
+    if job.pgid.is_some_and(|g| procs.group_alive(g)) {
         return Some(if job.state != "awaiting_takeover" {
             Action::AwaitTakeover
         } else if job.canceled {
@@ -175,7 +156,6 @@ mod tests {
     struct Fake {
         alive: HashSet<i64>,
         groups: HashSet<i64>,
-        marked: HashSet<String>,
     }
 
     impl Processes for Fake {
@@ -184,9 +164,6 @@ mod tests {
         }
         fn group_alive(&self, pgid: i64) -> bool {
             self.groups.contains(&pgid)
-        }
-        fn marked(&self, job: &str) -> bool {
-            self.marked.contains(job)
         }
         fn terminate(&self, _: &ActiveJob, _: bool) {}
     }
@@ -203,82 +180,58 @@ mod tests {
         }
     }
 
-    fn fake(alive: &[i64], groups: &[i64], marked: bool) -> Fake {
+    fn fake(alive: &[i64], groups: &[i64]) -> Fake {
         Fake {
             alive: alive.iter().copied().collect(),
             groups: groups.iter().copied().collect(),
-            marked: if marked {
-                HashSet::from(["j".to_string()])
-            } else {
-                HashSet::new()
-            },
         }
     }
 
     #[test]
     fn queued_jobs_never_ran_so_a_lost_starter_means_start_failed() {
         let start_failed = Some(Action::Finish("start_failed", None));
-        assert_eq!(check(&job("queued"), &fake(&[10], &[], false)), None);
-        assert_eq!(
-            check(&job("queued"), &fake(&[20], &[], false)),
-            start_failed
-        );
+        assert_eq!(check(&job("queued"), &fake(&[10], &[])), None);
+        assert_eq!(check(&job("queued"), &fake(&[20], &[])), start_failed);
 
         let mut waiting = job("queued");
         waiting.executor = None;
         assert_eq!(
-            check(&waiting, &fake(&[20], &[], false)),
+            check(&waiting, &fake(&[20], &[])),
             None,
             "launcher still starting the executor"
         );
-        assert_eq!(check(&waiting, &fake(&[], &[], false)), start_failed);
+        assert_eq!(check(&waiting, &fake(&[], &[])), start_failed);
         waiting.launcher = None;
-        assert_eq!(
-            check(&waiting, &fake(&[], &[], false)),
-            None,
-            "no launcher known"
-        );
+        assert_eq!(check(&waiting, &fake(&[], &[])), None, "no launcher known");
     }
 
     #[test]
     fn a_lost_executor_holds_the_job_while_its_processes_run() {
         let mut j = job("running");
         j.pgid = Some(30);
-        assert_eq!(check(&j, &fake(&[10], &[30], false)), None);
+        assert_eq!(check(&j, &fake(&[10], &[30])), None);
+        assert_eq!(check(&j, &fake(&[], &[30])), Some(Action::AwaitTakeover));
         assert_eq!(
-            check(&j, &fake(&[], &[30], false)),
-            Some(Action::AwaitTakeover)
-        );
-        assert_eq!(
-            check(&j, &fake(&[], &[], true)),
-            Some(Action::AwaitTakeover),
-            "found by marker"
-        );
-        assert_eq!(
-            check(&j, &fake(&[], &[], false)),
+            check(&j, &fake(&[], &[])),
             Some(Action::Finish("ended_unknown", None))
         );
 
         j.state = "awaiting_takeover".into();
-        assert_eq!(check(&j, &fake(&[], &[30], false)), None);
+        assert_eq!(check(&j, &fake(&[], &[30])), None);
         j.main_exit_code = Some(4);
         assert_eq!(
-            check(&j, &fake(&[], &[], false)),
+            check(&j, &fake(&[], &[])),
             Some(Action::Finish("completed", Some(4)))
         );
     }
 
     #[test]
-    fn a_lost_start_confirmation_is_never_rerun_or_reported_as_not_started() {
+    fn a_lost_start_confirmation_is_never_reported_as_not_started() {
         // Leased, but the executor died before reporting the start: the
         // command may have run.
         let j = job("admitted");
         assert_eq!(
-            check(&j, &fake(&[], &[], true)),
-            Some(Action::AwaitTakeover)
-        );
-        assert_eq!(
-            check(&j, &fake(&[], &[], false)),
+            check(&j, &fake(&[], &[])),
             Some(Action::Finish("ended_unknown", None))
         );
     }
@@ -288,14 +241,14 @@ mod tests {
         let mut j = job("awaiting_takeover");
         j.pgid = Some(30);
         j.canceled = true;
-        assert_eq!(check(&j, &fake(&[], &[30], false)), Some(Action::Terminate));
+        assert_eq!(check(&j, &fake(&[], &[30])), Some(Action::Terminate));
         assert_eq!(
-            check(&j, &fake(&[], &[], false)),
+            check(&j, &fake(&[], &[])),
             Some(Action::Finish("canceled", None))
         );
         j.state = "running".into();
         assert_eq!(
-            check(&j, &fake(&[], &[30], false)),
+            check(&j, &fake(&[], &[30])),
             Some(Action::AwaitTakeover),
             "first marked as taken over"
         );

@@ -1,4 +1,4 @@
-//! Locks (design 10.7): path resources conflict when one path is the other
+//! Locks (design 10.4): path resources conflict when one path is the other
 //! or an ancestor of it, compared component by component on the real path;
 //! named resources conflict when equal.
 
@@ -110,7 +110,7 @@ const PROJECT_MARKERS: &[&str] = &[
 ];
 
 /// The project around `dir`: the Git worktree root, else the nearest
-/// directory with a project marker file, else `dir` (design 10.7).
+/// directory with a project marker file, else `dir`.
 pub fn project_root(dir: &Path) -> PathBuf {
     if let Some(git) = dir.ancestors().find(|d| d.join(".git").exists()) {
         return git.to_path_buf();
@@ -122,8 +122,8 @@ pub fn project_root(dir: &Path) -> PathBuf {
 }
 
 /// The locks a command line needs: each command's write scope from its
-/// profile, files written by redirections, the project for unknown commands
-/// and unclear lines, and the extra `--lock` values.
+/// profile, files written by redirections, and the extra `--lock` values.
+/// Commands without a profile take no lock.
 pub fn for_line(
     analysis: &Analysis,
     cwd: &Path,
@@ -131,9 +131,6 @@ pub fn for_line(
     extra: &[String],
 ) -> Vec<Lock> {
     let mut locks = Vec::new();
-    if analysis.structure.is_none() {
-        locks.push(Lock::path(&project_root(cwd)));
-    }
     for s in &analysis.segments {
         let profile = profiles
             .find(&s.argv)
@@ -250,13 +247,13 @@ mod tests {
         assert_eq!(locks("ls -la", &[]), Vec::<String>::new());
         assert_eq!(locks("cargo build", &[]), ["<root>/target"]);
         assert_eq!(locks("cargo build && cargo fmt", &[]), ["<root>"]);
-        assert_eq!(locks("./build.sh", &[]), ["<root>"]);
+        assert_eq!(locks("./build.sh", &[]), Vec::<String>::new());
+        assert_eq!(locks("make", &[]), ["<root>"]);
         assert_eq!(
             locks("cd sub && rm -f a.txt b.txt", &[]),
             ["<root>/sub/a.txt", "<root>/sub/b.txt"]
         );
         assert_eq!(locks("echo hi > out.log", &[]), ["<root>/out.log"]);
-        assert_eq!(locks("if true; then make; fi", &[]), ["<root>"]);
         assert_eq!(
             locks("adb install app.apk", &["device:phone"]),
             ["named:device:phone"]

@@ -1,5 +1,5 @@
-# Built-in tool profiles (design 8.2). Tests are never frozen: timeouts
-# inside them would fail (design 11). Resource figures are starting points;
+# Built-in tool profiles (design 8.2). Memory figures include allocations
+# outside the private range, such as GPU memory, and are starting points:
 # measured history replaces them after the first runs (design 8.3).
 # Files in the data directory's profiles.d/ add profiles or replace these by
 # name.
@@ -38,7 +38,6 @@ program = ["ls"]
 args_any = ["-R", "--recursive"]
 class = "medium"
 writes = "none"
-resources = { disk = true }
 
 [[profile]]
 name = "read-file"
@@ -68,7 +67,6 @@ name = "search"
 program = ["grep", "egrep", "rg", "ag", "find", "fd", "du", "tree", "sed", "awk"]
 class = "medium"
 writes = "none"
-resources = { cpu = 1, disk = true }
 
 [[profile]]
 name = "file-change"
@@ -80,15 +78,12 @@ writes = "args"
 name = "archive"
 program = ["tar", "zip", "unzip", "gzip", "gunzip", "xz", "zstd"]
 class = "medium"
-resources = { cpu = 1, disk = true }
 
 [[profile]]
 name = "network-fetch"
 program = ["curl", "wget"]
 class = "light"
 writes = "none"
-resources = { network = true }
-merge = { allowed = false }
 
 [[profile]]
 name = "interactive"
@@ -121,7 +116,6 @@ value_flags = ["-C", "-c", "--git-dir", "--work-tree"]
 subcommand = ["status", "log", "diff", "show", "branch", "blame", "ls-files", "grep", "describe", "shortlog", "reflog", "worktree list"]
 class = "medium"
 writes = "none"
-resources = { cpu = 1, disk = true }
 
 [[profile]]
 name = "git-write"
@@ -130,7 +124,6 @@ value_flags = ["-C", "-c", "--git-dir", "--work-tree"]
 subcommand = ["add", "commit", "checkout", "switch", "restore", "reset", "merge", "rebase", "cherry-pick", "revert", "stash", "tag", "mv", "rm", "clean", "apply", "am", "worktree add", "worktree remove"]
 class = "medium"
 writes = "project"
-resources = { cpu = 1, disk = true }
 
 [[profile]]
 name = "git-interactive"
@@ -139,6 +132,7 @@ value_flags = ["-C", "-c", "--git-dir", "--work-tree"]
 subcommand = ["rebase", "add", "commit"]
 args_any = ["-i", "--interactive", "-p", "--patch"]
 class = "light"
+writes = "project"
 interactive = true
 
 [[profile]]
@@ -148,8 +142,6 @@ value_flags = ["-C", "-c", "--git-dir", "--work-tree"]
 subcommand = ["clone", "fetch", "pull", "push", "submodule", "lfs"]
 class = "medium"
 writes = "project"
-resources = { cpu = 1, disk = true, network = true }
-freezable = false
 
 # Rust --------------------------------------------------------------------
 
@@ -161,8 +153,7 @@ subcommand = ["build", "b", "run", "r", "install", "doc", "bench"]
 class = "heavy"
 writes = "paths"
 write_paths = ["target"]
-resources = { mem = "3G", cpu = 0, disk = true }
-merge = { allowed = true, inputs = ["project sources", "Cargo.lock", "environment"] }
+mem = "3G"
 parallelism = { env = ["CARGO_BUILD_JOBS"], flag = "-j", jobserver = true }
 
 [[profile]]
@@ -173,10 +164,8 @@ subcommand = ["test", "t", "nextest"]
 class = "heavy"
 writes = "paths"
 write_paths = ["target"]
-resources = { mem = "4G", cpu = 0, disk = true }
-merge = { allowed = true, inputs = ["project sources", "Cargo.lock", "environment", "test data"] }
+mem = "4G"
 parallelism = { env = ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS"], flag = "-j", jobserver = true }
-freezable = false
 
 [[profile]]
 name = "cargo-check"
@@ -186,8 +175,7 @@ subcommand = ["check", "c", "clippy"]
 class = "heavy"
 writes = "paths"
 write_paths = ["target"]
-resources = { mem = "2G", cpu = 0, disk = true }
-merge = { allowed = true, inputs = ["project sources", "Cargo.lock", "environment"] }
+mem = "2G"
 parallelism = { env = ["CARGO_BUILD_JOBS"], flag = "-j", jobserver = true }
 
 [[profile]]
@@ -203,8 +191,6 @@ program = ["cargo"]
 subcommand = ["fetch", "update", "add", "remove", "generate-lockfile"]
 class = "medium"
 writes = "project"
-resources = { network = true }
-freezable = false
 
 [[profile]]
 name = "cargo-info"
@@ -217,7 +203,7 @@ writes = "none"
 name = "rustc"
 program = ["rustc"]
 class = "heavy"
-resources = { mem = "1G", cpu = 1 }
+mem = "1G"
 
 # C, C++, Swift, Apple ----------------------------------------------------
 
@@ -225,14 +211,16 @@ resources = { mem = "1G", cpu = 1 }
 name = "make"
 program = ["make", "gmake"]
 class = "heavy"
-resources = { mem = "2G", cpu = 0, disk = true }
+writes = "project"
+mem = "2G"
 parallelism = { flag = "-j", jobserver = true }
 
 [[profile]]
 name = "ninja"
 program = ["ninja"]
 class = "heavy"
-resources = { mem = "2G", cpu = 0, disk = true }
+writes = "project"
+mem = "2G"
 parallelism = { flag = "-j", jobserver = true }
 
 [[profile]]
@@ -240,7 +228,8 @@ name = "cmake-build"
 program = ["cmake"]
 args_any = ["--build"]
 class = "heavy"
-resources = { mem = "2G", cpu = 0, disk = true }
+writes = "project"
+mem = "2G"
 parallelism = { env = ["CMAKE_BUILD_PARALLEL_LEVEL"], flag = "-j" }
 
 [[profile]]
@@ -248,21 +237,21 @@ name = "cmake-configure"
 program = ["cmake"]
 args_none = ["--build"]
 class = "medium"
-resources = { cpu = 1, disk = true }
+writes = "project"
 
 [[profile]]
 name = "cc"
 program = ["cc", "gcc", "g++", "clang", "clang++"]
 class = "medium"
-resources = { mem = "1G", cpu = 1 }
+mem = "1G"
 
 [[profile]]
 name = "xcodebuild"
 program = ["xcodebuild"]
 class = "heavy"
-resources = { mem = "6G", cpu = 0, disk = true }
+writes = "project"
+mem = "6G"
 parallelism = { flag = "-jobs" }
-daemons = [{ name = "XCBBuildService", shared = true }, { name = "SWBBuildService", shared = true }]
 
 [[profile]]
 name = "swift-build"
@@ -271,7 +260,7 @@ subcommand = ["build", "test", "run"]
 class = "heavy"
 writes = "paths"
 write_paths = [".build"]
-resources = { mem = "3G", cpu = 0, disk = true }
+mem = "3G"
 parallelism = { flag = "-j" }
 
 # Go ----------------------------------------------------------------------
@@ -281,7 +270,8 @@ name = "go-build"
 program = ["go"]
 subcommand = ["build", "run", "install", "vet", "generate"]
 class = "heavy"
-resources = { mem = "2G", cpu = 0, disk = true }
+writes = "project"
+mem = "2G"
 parallelism = { env = ["GOMAXPROCS"], flag = "-p" }
 
 [[profile]]
@@ -289,17 +279,15 @@ name = "go-test"
 program = ["go"]
 subcommand = ["test"]
 class = "heavy"
-resources = { mem = "2G", cpu = 0, disk = true }
+mem = "2G"
 parallelism = { env = ["GOMAXPROCS"], flag = "-p" }
-freezable = false
 
 [[profile]]
 name = "go-mod"
 program = ["go"]
 subcommand = ["mod download", "mod tidy", "get"]
 class = "medium"
-resources = { network = true }
-freezable = false
+writes = "project"
 
 # JavaScript and TypeScript -----------------------------------------------
 
@@ -310,48 +298,48 @@ subcommand = ["install", "i", "ci", "add", "update", "upgrade"]
 class = "heavy"
 writes = "paths"
 write_paths = ["node_modules", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"]
-resources = { mem = "2G", cpu = 2, disk = true, network = true }
-freezable = false
+mem = "2G"
 
 [[profile]]
 name = "tsc"
 program = ["tsc", "vue-tsc"]
 class = "heavy"
-resources = { mem = "2G", cpu = 1 }
+writes = "project"
+mem = "2G"
 
 [[profile]]
 name = "js-test"
 program = ["jest", "vitest", "mocha", "playwright"]
 class = "heavy"
-resources = { mem = "3G", cpu = 0 }
+mem = "3G"
 parallelism = { flag = "--max-workers" }
-freezable = false
 
 [[profile]]
 name = "js-bundle"
 program = ["webpack", "vite", "rollup", "esbuild", "next", "nuxt", "turbo", "nx"]
 class = "heavy"
-resources = { mem = "3G", cpu = 0, disk = true }
+writes = "project"
+mem = "3G"
 
 [[profile]]
 name = "js-lint"
 program = ["eslint", "prettier", "biome", "stylelint"]
 class = "medium"
-resources = { mem = "1G", cpu = 1 }
+mem = "1G"
 
 [[profile]]
 name = "node-repl"
 program = ["node", "deno", "bun"]
 class = "medium"
 interactive_without_args = true
-resources = { mem = "512M", cpu = 1 }
+mem = "512M"
 
 [[profile]]
 name = "metro"
 program = ["react-native"]
 subcommand = ["start", "run-android", "run-ios", "bundle"]
 class = "heavy"
-resources = { mem = "3G", cpu = 0 }
+mem = "3G"
 
 # Python ------------------------------------------------------------------
 
@@ -359,32 +347,30 @@ resources = { mem = "3G", cpu = 0 }
 name = "pytest"
 program = ["pytest", "py.test", "tox", "nox"]
 class = "heavy"
-resources = { mem = "1G", cpu = 1 }
+mem = "1G"
 parallelism = { flag = "-n" }
-freezable = false
 
 [[profile]]
 name = "python-pytest"
 program = ["python", "python3"]
 args_any = ["pytest"]
 class = "heavy"
-resources = { mem = "1G", cpu = 1 }
-freezable = false
+mem = "1G"
 
 [[profile]]
 name = "python-repl"
 program = ["python", "python3", "ipython"]
 class = "medium"
 interactive_without_args = true
-resources = { mem = "512M", cpu = 1 }
+mem = "512M"
 
 [[profile]]
 name = "python-install"
 program = ["pip", "pip3", "uv", "poetry", "pipx", "conda", "mamba"]
 subcommand = ["install", "sync", "add", "lock", "update", "pip install", "pip sync", "create"]
 class = "heavy"
-resources = { mem = "1G", cpu = 1, disk = true, network = true }
-freezable = false
+writes = "project"
+mem = "1G"
 
 # Android, JVM -------------------------------------------------------------
 
@@ -392,15 +378,16 @@ freezable = false
 name = "gradle"
 program = ["gradle", "gradlew"]
 class = "heavy"
-resources = { mem = "6G", cpu = 0, disk = true }
+writes = "project"
+mem = "6G"
 parallelism = { flag = "--max-workers" }
-daemons = [{ name = "GradleDaemon", shared = true }, { name = "KotlinCompileDaemon", shared = true }]
 
 [[profile]]
 name = "maven"
 program = ["mvn", "mvnw"]
 class = "heavy"
-resources = { mem = "3G", cpu = 0, disk = true }
+writes = "project"
+mem = "3G"
 parallelism = { flag = "-T" }
 
 [[profile]]
@@ -408,7 +395,6 @@ name = "device-tools"
 program = ["adb", "xcrun"]
 class = "medium"
 writes = "none"
-freezable = false
 
 # Containers and system packages ------------------------------------------
 
@@ -418,7 +404,7 @@ program = ["docker", "podman"]
 subcommand = ["build", "buildx build", "compose build"]
 class = "heavy"
 writes = "none"
-resources = { mem = "4G", cpu = 0, disk = true, network = true }
+mem = "4G"
 
 [[profile]]
 name = "brew-install"
@@ -426,8 +412,7 @@ program = ["brew"]
 subcommand = ["install", "upgrade", "reinstall", "update"]
 class = "heavy"
 writes = "none"
-resources = { mem = "1G", cpu = 0, disk = true, network = true }
-freezable = false
+mem = "1G"
 
 # Local inference ---------------------------------------------------------
 
@@ -436,8 +421,7 @@ name = "mlx-lm"
 program = ["mlx_lm.generate", "mlx_lm.chat", "mlx_lm.lora", "mlx_lm.fuse", "mlx_lm.convert", "mlx_vlm.generate"]
 class = "heavy"
 writes = "none"
-resources = { mem = "1G", extra = "6G", cpu = 1, gpu = "metal" }
-merge = { allowed = false }
+mem = "7G"
 
 [[profile]]
 name = "mlx-server"
@@ -445,23 +429,21 @@ program = ["mlx_lm.server", "mlx_vlm.server"]
 class = "heavy"
 writes = "none"
 service = true
-resources = { mem = "1G", extra = "6G", cpu = 1, gpu = "metal", network = true }
+mem = "7G"
 
 [[profile]]
 name = "mflux"
 program = ["mflux-generate", "mflux-generate-qwen", "mflux-generate-qwen-2.1"]
 class = "heavy"
 writes = "none"
-resources = { mem = "1G", extra = "10G", cpu = 1, gpu = "metal" }
-merge = { allowed = false }
+mem = "11G"
 
 [[profile]]
 name = "llama-cpp"
 program = ["llama-cli", "llama-server", "llama-bench", "whisper-cli"]
 class = "heavy"
 writes = "none"
-resources = { mem = "1G", extra = "6G", cpu = 0, gpu = "metal" }
-merge = { allowed = false }
+mem = "7G"
 
 [[profile]]
 name = "ollama-run"
@@ -469,6 +451,4 @@ program = ["ollama"]
 subcommand = ["run"]
 class = "heavy"
 writes = "none"
-resources = { mem = "512M", extra = "6G", gpu = "metal" }
-daemons = [{ name = "ollama serve", shared = true }]
-merge = { allowed = false }
+mem = "6656M"

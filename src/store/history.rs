@@ -9,7 +9,7 @@ use rusqlite::params;
 use super::Store;
 use crate::sched::predict::Stats;
 
-/// History older than this is not used (design 13: kept 90 days).
+/// History older than this is not used (design 11: kept 90 days).
 const WINDOW: Duration = Duration::from_secs(90 * 24 * 3600);
 /// Enough recent runs for a percentile.
 const LIMIT: i64 = 200;
@@ -68,12 +68,6 @@ mod tests {
             cwd: project.into(),
             project_root: project.into(),
             session_id: None,
-            agent: None,
-            invocation_key: None,
-            request_id: None,
-            sandbox_signature: None,
-            service: false,
-            options: serde_json::json!({}),
             launcher: None,
             plan: Plan {
                 history_key: Some(key.into()),
@@ -82,9 +76,9 @@ mod tests {
         };
         let job = store.create_submission(&new).unwrap().job;
         store.set_executor(&job, 1, "t").unwrap();
-        store.admit(&job, 0, 0, 1).unwrap();
-        store.set_started(&job, "/l", None, None).unwrap();
-        store.record_exit_usage(&job, 1.0, Some(peak)).unwrap();
+        store.admit(&job, 0, 1).unwrap();
+        store.set_started(&job, "/l", None).unwrap();
+        store.record_exit_usage(&job, peak).unwrap();
         store.finish(&job, state, Some(0)).unwrap();
     }
 

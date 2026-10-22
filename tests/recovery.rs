@@ -1,4 +1,4 @@
-//! Fault injection against the real binary (design 7.3): the daemon or an
+//! Fault injection against the real binary (design 7.1): the daemon or an
 //! executor is killed while a job runs.
 
 use std::path::{Path, PathBuf};

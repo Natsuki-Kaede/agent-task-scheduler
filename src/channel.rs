@@ -1,4 +1,4 @@
-//! Request-file channel (design 6.8): for clients that cannot reach the unix
+//! Request-file channel (design 4): for clients that cannot reach the unix
 //! socket, such as agents in a sandbox without network access. A client
 //! writes `<id>.req`, the daemon answers with `<id>.resp`. Both are written
 //! to a temporary name first and renamed, so a reader never sees a partial

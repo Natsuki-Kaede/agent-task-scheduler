@@ -1,5 +1,5 @@
 //! Job lifecycle endpoints used by executors, and the bounded wait used by
-//! the CLI (design 5.4, 5.5, 7.3).
+//! the CLI (design 5.4, 7.1).
 
 use std::time::Duration;
 
@@ -27,12 +27,8 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/submissions/{id}/wait", post(wait))
         .route("/v1/submissions/{id}/cancel", post(cancel))
         .route("/v1/submissions/{id}/detach", post(detach))
-        .route("/v1/submissions/{id}/retrieved", post(retrieved))
-        .route("/v1/requests/{id}", get(by_request))
         .route("/v1/jobs/{id}/why", get(why))
         .route("/v1/jobs/{id}/unblock", post(unblock))
-        .route("/v1/jobs/{id}/pin", post(pin))
-        .route("/v1/jobs/{id}/controls", get(controls).post(set_controls))
 }
 
 fn ok() -> ApiResult<Response> {
@@ -75,7 +71,7 @@ const LEASE_POLL: Duration = if cfg!(test) {
     Duration::from_secs(3)
 };
 
-/// Answers whether the scheduler has admitted the job (design 10). The
+/// Answers whether the scheduler has admitted the job (design 7.1). The
 /// lease is already committed when it is granted; the request waits a
 /// little for a decision so commands do not lose a polling interval.
 async fn lease(
@@ -128,9 +124,6 @@ async fn lease(
 struct StartedBody {
     log_path: String,
     pgid: Option<i64>,
-    /// Environment the executor added, such as the jobserver.
-    #[serde(default)]
-    env: serde_json::Map<String, serde_json::Value>,
 }
 
 async fn started(
@@ -138,9 +131,7 @@ async fn started(
     Path(id): Path<String>,
     Json(b): Json<StartedBody>,
 ) -> ApiResult<Response> {
-    let injected = (!b.env.is_empty()).then(|| serde_json::Value::Object(b.env).to_string());
-    s.store()
-        .set_started(&id, &b.log_path, b.pgid, injected.as_deref())?;
+    s.store().set_started(&id, &b.log_path, b.pgid)?;
     s.notify();
     ok()
 }
@@ -164,9 +155,8 @@ async fn main_result(
 struct FinishedBody {
     state: String,
     exit_code: Option<i64>,
-    /// CPU time of every process the command waited for.
-    cpu_seconds: Option<f64>,
-    /// The largest resident size of any one of them.
+    /// The largest resident size of any process the command waited for,
+    /// for commands too short to sample (design 8.3).
     max_rss: Option<i64>,
 }
 
@@ -181,8 +171,8 @@ async fn finished(
             format!("{} is not a terminal state", b.state),
         ));
     }
-    if let Some(cpu) = b.cpu_seconds {
-        s.store().record_exit_usage(&id, cpu, b.max_rss)?;
+    if let Some(rss) = b.max_rss {
+        s.store().record_exit_usage(&id, rss)?;
     }
     s.store().finish(&id, &b.state, b.exit_code)?;
     s.notify();
@@ -193,10 +183,8 @@ async fn finished(
 /// connected.
 async fn control(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
     s.contact(&id);
-    let store = s.store();
-    let cancel = store.cancel_requested(&id)?;
-    let tokens = store.controls(&id)?.tokens;
-    Ok(Json(json!({ "cancel": cancel, "tokens": tokens })).into_response())
+    let cancel = s.store().cancel_requested(&id)?;
+    Ok(Json(json!({ "cancel": cancel })).into_response())
 }
 
 #[derive(Deserialize)]
@@ -269,19 +257,21 @@ async fn detach(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<
     ok()
 }
 
-async fn retrieved(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    s.store().mark_retrieved(&id)?;
-    ok()
+/// Why a job is where it is: its state, and for a waiting job the
+/// scheduler's latest verdict (design 5.3).
+async fn why(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    let row = s
+        .store()
+        .job(&id)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no job {id}")))?;
+    let verdict = s.verdicts.lock().expect("verdicts lock").get(&id).cloned();
+    Ok(Json(json!({ "job": id, "state": row.state, "verdict": verdict })).into_response())
 }
 
-async fn by_request(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    match s.store().submission_by_request(&id)? {
-        Some(row) => Ok(Json(row).into_response()),
-        None => Err(ApiError(
-            StatusCode::NOT_FOUND,
-            format!("no submission with request id {id}"),
-        )),
-    }
+async fn unblock(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    s.store().unblock(&id)?;
+    s.notify();
+    ok()
 }
 
 #[cfg(test)]
@@ -306,7 +296,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_runs_to_terminal_and_result_is_retrieved() {
+    async fn job_runs_to_terminal() {
         let state = crate::api::AppState::new(
             crate::store::Store::open_in_memory().unwrap(),
             "t".into(),
@@ -351,7 +341,7 @@ mod tests {
         let lease_path = format!("/v1/jobs/{job}/lease");
         let lease = |pid: i64| call(&app, "POST", &lease_path, Some(json!({"pid": pid})));
         assert_eq!(lease(1).await.1["granted"], false);
-        state.store().admit(&job, 1 << 30, 0, 1).unwrap();
+        state.store().admit(&job, 1 << 30, 1).unwrap();
         // Asking again after a lost answer gets the same lease; only the
         // executor gets it.
         for _ in 0..2 {
@@ -366,11 +356,6 @@ mod tests {
             StatusCode::NO_CONTENT
         );
         assert_eq!(wait("main").await["reached"], false);
-        // The retrieved marker needs a terminal state.
-        assert_eq!(
-            post(format!("/v1/submissions/{sub}/retrieved"), json!({})).await,
-            StatusCode::CONFLICT
-        );
 
         post(
             format!("/v1/jobs/{job}/main-result"),
@@ -410,13 +395,6 @@ mod tests {
         let w = wait("terminal").await;
         assert_eq!(w["reached"], true);
         assert_eq!(w["submission"]["exit_code"], 2);
-        assert_eq!(w["submission"]["final_retrieved"], false);
-        assert_eq!(
-            post(format!("/v1/submissions/{sub}/retrieved"), json!({})).await,
-            StatusCode::NO_CONTENT
-        );
-        let (_, row) = call(&app, "GET", &format!("/v1/submissions/{sub}"), None).await;
-        assert_eq!(row["final_retrieved"], true);
     }
 
     #[tokio::test]
@@ -444,83 +422,4 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::CONFLICT);
     }
-
-    #[tokio::test]
-    async fn finds_submissions_by_request_id() {
-        let app = app();
-        let body = json!({"entry": "argv", "argv": ["make"], "cwd": "/w", "request_id": "r1"});
-        let (_, created) = call(&app, "POST", "/v1/jobs", Some(body)).await;
-        let (st, row) = call(&app, "GET", "/v1/requests/r1", None).await;
-        assert_eq!(st, StatusCode::OK);
-        assert_eq!(row["id"], created["submission"]);
-        assert_eq!(
-            call(&app, "GET", "/v1/requests/r2", None).await.0,
-            StatusCode::NOT_FOUND
-        );
-    }
-}
-
-/// Why a job is where it is: its state, and for a waiting job the
-/// scheduler's latest verdict (design 5.4).
-async fn why(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    let row = s
-        .store()
-        .job(&id)?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no job {id}")))?;
-    let verdict = s.verdicts.lock().expect("verdicts lock").get(&id).cloned();
-    Ok(Json(json!({ "job": id, "state": row.state, "verdict": verdict })).into_response())
-}
-
-async fn unblock(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    s.store().unblock(&id)?;
-    s.notify();
-    ok()
-}
-
-#[derive(Deserialize)]
-struct PinBody {
-    /// Queue position; lower runs first. `null` unpins.
-    rank: Option<i64>,
-}
-
-async fn pin(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-    Json(b): Json<PinBody>,
-) -> ApiResult<Response> {
-    s.store().pin(&id, b.rank)?;
-    s.notify();
-    ok()
-}
-
-async fn controls(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    Ok(Json(s.store().controls(&id)?).into_response())
-}
-
-/// Sets a job's background QoS, freezing, duty cycle and jobserver target
-/// (design 10.6, 11). The pressure response sets these; so can the
-/// dashboard.
-async fn set_controls(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-    Json(c): Json<crate::control::Controls>,
-) -> ApiResult<Response> {
-    if c.duty.is_some_and(|d| !(0.0..1.0).contains(&d) || d == 0.0) {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "duty is the running fraction, between 0 and 1".into(),
-        ));
-    }
-    let boot = s
-        .measurements
-        .lock()
-        .expect("measurements lock")
-        .boot_id
-        .clone()
-        .or_else(crate::sample::boot_id)
-        .unwrap_or_default();
-    let awake = crate::timing::awake().as_nanos() as i64;
-    s.store().set_controls(&id, &c, awake, &boot, &s.instance)?;
-    s.notify();
-    ok()
 }

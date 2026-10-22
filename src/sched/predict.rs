@@ -14,46 +14,18 @@ use crate::recognize::{Analysis, Node, Segment};
 /// What a job is expected to use.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Prediction {
-    /// Peak private memory (R).
-    pub private: u64,
-    /// Memory outside the private range, from profiles (B).
-    pub extra: u64,
-    pub cores: f64,
+    /// Peak memory (R).
+    pub mem: u64,
     /// Run time, when every part of the line has history.
     pub seconds: Option<f64>,
-    /// Every command in the line may be frozen (design 11): known, marked
-    /// freezable, and not transferring over the network.
-    pub freezable: bool,
 }
 
-/// `--hint mem=6G,cpu=4`: only used where it is higher than the prediction.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Hint {
-    pub mem: Option<u64>,
-    pub cpu: Option<f64>,
-}
-
-impl Hint {
-    pub fn parse(text: &str) -> Result<Hint, String> {
-        let mut hint = Hint::default();
-        for part in text.split(',').filter(|p| !p.is_empty()) {
-            let (key, value) = part
-                .split_once('=')
-                .ok_or_else(|| format!("expected key=value in {part:?}"))?;
-            match key.trim() {
-                "mem" => hint.mem = Some(crate::profile::parse_size(value)?),
-                "cpu" => {
-                    hint.cpu = Some(
-                        value
-                            .trim()
-                            .parse()
-                            .map_err(|_| format!("bad cpu value {value:?}"))?,
-                    );
-                }
-                other => return Err(format!("unknown hint {other:?}; use mem and cpu")),
-            }
-        }
-        Ok(hint)
+/// `--hint mem=6G`: the agent's own estimate, used only where it is higher
+/// than the prediction.
+pub fn parse_hint(text: &str) -> Result<u64, String> {
+    match text.trim().split_once('=') {
+        Some(("mem", value)) => crate::profile::parse_size(value),
+        _ => Err(format!("expected mem=<size>, got {text:?}")),
     }
 }
 
@@ -62,19 +34,16 @@ impl Hint {
 pub struct Defaults {
     pub light: u64,
     pub medium: u64,
-    /// For unknown and heavy commands: a fraction of total memory (design
-    /// 8.3: 15% initially).
+    /// For unknown and heavy commands: 15% of total memory (design 8.3).
     pub conservative: u64,
-    pub cores: f64,
 }
 
 impl Defaults {
-    pub fn for_machine(mem_total: u64, cores: f64) -> Self {
+    pub fn for_machine(mem_total: u64) -> Self {
         Defaults {
             light: 64 << 20,
             medium: 512 << 20,
             conservative: mem_total * 15 / 100,
-            cores,
         }
     }
 }
@@ -142,29 +111,23 @@ pub fn line_key(analysis: &Analysis) -> Option<String> {
 #[derive(Clone, Copy, Default)]
 struct Need {
     mem: u64,
-    extra: u64,
-    cores: f64,
     seconds: Option<f64>,
 }
 
 impl Need {
-    /// Running at the same time: resources add up, the longest decides the
+    /// Running at the same time: memory adds up, the longest decides the
     /// time.
     fn add(self, o: Need) -> Need {
         Need {
             mem: self.mem + o.mem,
-            extra: self.extra + o.extra,
-            cores: self.cores + o.cores,
             seconds: self.seconds.zip(o.seconds).map(|(a, b)| a.max(b)),
         }
     }
 
-    /// The larger of two resource needs; time is handled by the caller.
+    /// The larger memory; time is handled by the caller.
     fn max(self, o: Need) -> Need {
         Need {
             mem: self.mem.max(o.mem),
-            extra: self.extra.max(o.extra),
-            cores: self.cores.max(o.cores),
             seconds: self.seconds,
         }
     }
@@ -179,7 +142,6 @@ fn segment(
     let profile = profiles
         .find(&s.argv)
         .filter(|p| Some(&p.name) == s.profile.as_ref());
-    let r = profile.map(|p| &p.resources);
     let measured = key(s)
         .map(|k| {
             let project = history(Lookup::ProjectKey(&k));
@@ -192,21 +154,14 @@ fn segment(
         .unwrap_or_default();
     let mem = measured
         .mem
-        .or(r.and_then(|r| r.mem))
+        .or(profile.and_then(|p| p.mem))
         .unwrap_or(match s.class {
             Some(Class::Light) => d.light,
             Some(Class::Medium) => d.medium,
             Some(Class::Heavy) | None => d.conservative,
         });
-    let cores = match r.and_then(|r| r.cpu) {
-        Some(c) if c <= 0.0 => d.cores,
-        Some(c) => c,
-        None => 1.0,
-    };
     Need {
         mem,
-        extra: r.and_then(|r| r.extra).unwrap_or(0),
-        cores,
         seconds: measured.seconds,
     }
 }
@@ -259,7 +214,7 @@ pub fn predict(
     analysis: &Analysis,
     profiles: &Profiles,
     defaults: &Defaults,
-    hint: &Hint,
+    hint: Option<u64>,
     history: &impl Fn(Lookup) -> Stats,
 ) -> Prediction {
     let needs: Vec<Need> = analysis
@@ -271,8 +226,6 @@ pub fn predict(
         Some(node) => combine(node, &needs),
         None => Need {
             mem: defaults.conservative,
-            extra: needs.iter().map(|n| n.extra).sum(),
-            cores: defaults.cores,
             seconds: None,
         },
     };
@@ -280,21 +233,9 @@ pub fn predict(
     let line = history(Lookup::Line);
     need.mem = line.mem.unwrap_or(need.mem);
     need.seconds = line.seconds.or(need.seconds);
-    let freezable = analysis.structure.is_some()
-        && analysis.segments.iter().all(|s| {
-            profiles.find(&s.argv).is_some_and(|p| {
-                Some(&p.name) == s.profile.as_ref() && p.freezable && !p.resources.network
-            })
-        });
     Prediction {
-        private: need.mem.max(hint.mem.unwrap_or(0)),
-        extra: need.extra,
-        cores: need
-            .cores
-            .max(hint.cpu.unwrap_or(0.0))
-            .min(defaults.cores.max(1.0)),
+        mem: need.mem.max(hint.unwrap_or(0)),
         seconds: need.seconds,
-        freezable,
     }
 }
 
@@ -313,12 +254,12 @@ mod tests {
         let profiles = Profiles::builtin();
         let dir = tempfile::tempdir().unwrap();
         let analysis = Recognizer::new(&profiles, &[]).shell(src, dir.path());
-        let defaults = Defaults::for_machine(16 * G, 10.0);
+        let hint = (!hint.is_empty()).then(|| parse_hint(hint).unwrap());
         predict(
             &analysis,
             &profiles,
-            &defaults,
-            &Hint::parse(hint).unwrap(),
+            &Defaults::for_machine(16 * G),
+            hint,
             &history,
         )
     }
@@ -339,55 +280,43 @@ mod tests {
     fn combines_by_structure() {
         // cargo-build 3G, cargo-test 4G, make 2G (built-in profiles).
         assert_eq!(
-            predict_line("cargo build && cargo test", "").private,
+            predict_line("cargo build && cargo test", "").mem,
             4 * G,
             "one after another: the larger"
         );
         assert_eq!(
-            predict_line("make | cargo build", "").private,
+            predict_line("make | cargo build", "").mem,
             5 * G,
             "a pipeline: the sum"
         );
         assert_eq!(
-            predict_line("make & cargo test; wait", "").private,
+            predict_line("make & cargo test; wait", "").mem,
             6 * G,
             "background keeps running"
         );
         assert_eq!(
-            predict_line("./build.sh", "").private,
+            predict_line("./build.sh", "").mem,
             16 * G * 15 / 100,
             "unknown: conservative"
         );
         assert_eq!(
-            predict_line("for x in a; do make; done", "").private,
+            predict_line("for x in a; do make; done", "").mem,
             16 * G * 15 / 100,
             "unclear"
         );
-        assert_eq!(predict_line("ls", "").private, 64 << 20);
+        assert_eq!(predict_line("ls", "").mem, 64 << 20);
     }
 
     #[test]
-    fn cores_extra_and_freezing() {
-        let p = predict_line("cargo build", "");
-        assert_eq!(
-            (p.cores, p.freezable),
-            (10.0, true),
-            "cpu 0 means all cores"
-        );
-        let p = predict_line("mlx_lm.generate --model m", "");
-        assert_eq!(p.extra, 6 * G);
-        assert!(
-            !predict_line("cargo build && ./deploy.sh", "").freezable,
-            "unknown commands are not frozen"
-        );
-        assert!(!predict_line("git clone url", "").freezable);
+    fn profile_memory_includes_gpu() {
+        assert_eq!(predict_line("mlx_lm.generate --model m", "").mem, 7 * G);
     }
 
     #[test]
     fn hints_only_raise() {
-        assert_eq!(predict_line("make", "mem=6G,cpu=4").private, 6 * G);
-        assert_eq!(predict_line("make", "mem=1G").private, 2 * G);
-        assert!(Hint::parse("gpu=1").is_err());
+        assert_eq!(predict_line("make", "mem=6G").mem, 6 * G);
+        assert_eq!(predict_line("make", "mem=1G").mem, 2 * G);
+        assert!(parse_hint("cpu=1").is_err());
     }
 
     #[test]
@@ -412,7 +341,7 @@ mod tests {
             Lookup::Line => stats(Some(G), 50.0),
             _ => stats(Some(9 * G), 99.0),
         });
-        assert_eq!((p.private, p.seconds), (G, Some(50.0)));
+        assert_eq!((p.mem, p.seconds), (G, Some(50.0)));
         // Otherwise per command: the project first, then anywhere.
         let p = with_history("cargo build && cargo test", "", |l| match l {
             Lookup::ProjectKey("cargo build") => stats(Some(5 * G), 30.0),
@@ -421,7 +350,7 @@ mod tests {
             _ => Stats::default(),
         });
         assert_eq!(
-            (p.private, p.seconds),
+            (p.mem, p.seconds),
             (5 * G, Some(50.0)),
             "one after another: larger peak, summed time"
         );
@@ -431,10 +360,10 @@ mod tests {
             Lookup::GlobalKey("cargo build") => stats(Some(G), 30.0),
             _ => Stats::default(),
         });
-        assert_eq!((p.private, p.seconds), (4 * G, None));
+        assert_eq!((p.mem, p.seconds), (4 * G, None));
         // A hint still only raises a measured figure.
         let p = with_history("make", "mem=8G", |_| stats(Some(G), 1.0));
-        assert_eq!(p.private, 8 * G);
+        assert_eq!(p.mem, 8 * G);
     }
 
     #[test]

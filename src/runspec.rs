@@ -1,4 +1,4 @@
-//! What to run: the two entry forms of `ats run` (design 5.3).
+//! What to run: the two entry forms of `ats run` (design 5.2).
 
 use serde::{Deserialize, Serialize};
 

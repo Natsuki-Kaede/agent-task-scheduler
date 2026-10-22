@@ -1,6 +1,9 @@
 //! `ats`: Agent Task Scheduler. Queues resource-heavy commands from AI agents
 //! and admits them by machine capacity.
 
+#[cfg(not(target_os = "macos"))]
+compile_error!("ats supports macOS only");
+
 mod api;
 mod channel;
 mod cli;
@@ -34,20 +37,6 @@ struct Cli {
     command: Command,
 }
 
-/// Identity and correlation, normally added by an agent hook.
-#[derive(clap::Args)]
-struct IdentityArgs {
-    /// Caller-generated id for querying this run later.
-    #[arg(long)]
-    request_id: Option<String>,
-    #[arg(long, hide = true)]
-    session: Option<String>,
-    #[arg(long, hide = true)]
-    tool: Option<String>,
-    #[arg(long, hide = true)]
-    call: Option<String>,
-}
-
 // Parsed once per process, so the size of `Run` does not matter.
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
@@ -70,8 +59,9 @@ enum Command {
         /// Return at once with the status line.
         #[arg(long)]
         no_wait: bool,
-        #[command(flatten)]
-        identity: IdentityArgs,
+        /// The agent session, added by its hook.
+        #[arg(long, hide = true)]
+        session: Option<String>,
         #[command(flatten)]
         options: cli::RunOptions,
         /// The program and its arguments, run without a shell.
@@ -85,15 +75,12 @@ enum Command {
         #[arg(long, value_parser = humantime::parse_duration, default_value = "90s")]
         wait: Duration,
     },
-    /// Show jobs, or one submission, job or request.
+    /// Show jobs, or one submission or job.
     Status {
         /// A submission or job id.
         id: Option<String>,
-        /// The request id given to `ats run --request-id`.
-        #[arg(long, conflicts_with = "id")]
-        request: Option<String>,
         /// Only jobs in these states, comma-separated.
-        #[arg(long, conflicts_with_all = ["id", "request"])]
+        #[arg(long, conflicts_with = "id")]
         state: Option<String>,
         /// Print JSON.
         #[arg(long)]
@@ -158,7 +145,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             sh,
             wait,
             no_wait,
-            identity,
+            session,
             options,
             argv,
         } => {
@@ -170,20 +157,12 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
                 None => runspec::RunSpec::Argv { argv },
             };
             let wait = if no_wait { Duration::ZERO } else { wait };
-            let id = cli::Identity {
-                session: identity.session,
-                tool: identity.tool,
-                call: identity.call,
-                request_id: identity.request_id,
-            };
-            cli::run(&paths, spec, Some(wait), id, options).await
+            cli::run(&paths, spec, Some(wait), session, options).await
         }
         Command::Wait { submission, wait } => cli::wait(&paths, &submission, Some(wait)).await,
         Command::Status {
-            id, request, json, ..
-        } if id.is_some() || request.is_some() => {
-            cli::status_one(&paths, id.as_deref(), request.as_deref(), json).await
-        }
+            id: Some(id), json, ..
+        } => cli::status_one(&paths, &id, json).await,
         Command::Logs { id, follow } => cli::logs(&paths, &id, follow).await,
         Command::Why { id } => cli::why(&paths, &id).await,
         Command::Unblock { id } => cli::unblock(&paths, &id).await,

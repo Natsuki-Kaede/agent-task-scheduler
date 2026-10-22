@@ -1,4 +1,4 @@
-//! Single-instance lock (design 7.3): an exclusive `flock` on the lock file,
+//! Single-instance lock (design 4): an exclusive `flock` on the lock file,
 //! held for the daemon's lifetime and released by the OS when it exits.
 
 use std::fs::{File, OpenOptions};

@@ -1,4 +1,4 @@
-//! Random identifiers. Submission IDs must not be guessable (design 5.5).
+//! Random identifiers. Submission IDs must not be guessable.
 
 use rand::RngExt;
 

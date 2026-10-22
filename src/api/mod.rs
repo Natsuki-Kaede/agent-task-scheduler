@@ -22,7 +22,7 @@ use crate::redact;
 use crate::sample::Snapshot;
 use crate::sched::Verdict;
 use crate::sched::pressure::PressureStatus;
-use crate::store::{Conflict, Entry, NewSubmission, NotFound, RequestIdConflict, Store};
+use crate::store::{Conflict, Entry, NewSubmission, NotFound, Store};
 use crate::timing::Deadline;
 
 #[derive(Clone)]
@@ -34,7 +34,7 @@ pub struct AppState {
     /// requests re-check their condition.
     pub changes: Arc<tokio::sync::watch::Sender<u64>>,
     /// Executors expected to reconnect after a restart, and until when
-    /// leases wait for them (design 7.3 ⑥).
+    /// leases wait for them (design 7.1).
     reconnect: Arc<Mutex<(HashSet<String>, Deadline)>>,
     stopping: Arc<AtomicBool>,
     /// The latest resource measurements (design 9).
@@ -46,7 +46,7 @@ pub struct AppState {
     awaited: Arc<Mutex<HashMap<String, usize>>>,
     /// The scheduler's latest verdict on each waiting job, for `ats why`.
     pub verdicts: Arc<Mutex<HashMap<String, Verdict>>>,
-    /// The pressure level and what it is doing (design 11).
+    /// Memory pressure and what it is doing (design 10.2).
     pub pressure: Arc<Mutex<PressureStatus>>,
 }
 
@@ -175,8 +175,7 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        if e.downcast_ref::<RequestIdConflict>().is_some() || e.downcast_ref::<Conflict>().is_some()
-        {
+        if e.downcast_ref::<Conflict>().is_some() {
             return ApiError(StatusCode::CONFLICT, e.to_string());
         }
         if e.downcast_ref::<NotFound>().is_some() {
@@ -203,20 +202,14 @@ async fn health(State(s): State<AppState>) -> Json<serde_json::Value> {
 
 /// Body of `POST /v1/jobs`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitRequest {
     pub entry: Entry,
     #[serde(default)]
     pub argv: Vec<String>,
     pub source: Option<String>,
-    pub shell: Option<String>,
     pub cwd: String,
     pub session: Option<String>,
-    pub agent: Option<String>,
-    pub invocation_key: Option<String>,
-    pub request_id: Option<String>,
-    pub sandbox_signature: Option<String>,
-    #[serde(default)]
-    pub service: bool,
     /// The submitting CLI, which starts the executor.
     pub launcher_pid: Option<i64>,
     pub launcher_start: Option<String>,
@@ -229,15 +222,8 @@ pub struct SubmitRequest {
     /// `--lock`: extra paths or named resources.
     #[serde(default)]
     pub lock: Vec<String>,
-    /// `--hint mem=6G,cpu=4`.
+    /// `--hint mem=6G`.
     pub hint: Option<String>,
-    /// `--urgency low|normal|high`.
-    pub urgency: Option<String>,
-    /// `--no-freeze`: never stop it with SIGSTOP.
-    #[serde(default)]
-    pub no_freeze: bool,
-    #[serde(flatten)]
-    pub options: serde_json::Map<String, serde_json::Value>,
 }
 
 impl<'de> Deserialize<'de> for Entry {
@@ -260,22 +246,8 @@ async fn submit(State(s): State<AppState>, Json(req): Json<SubmitRequest>) -> Ap
                 .ok_or_else(|| bad_request("sh entry needs source"))?,
         ),
     };
-    let mut options = req.options.clone();
-    if let Some(shell) = &req.shell {
-        options.insert("shell".into(), json!(shell));
-    }
-    let mut store = s.store();
-    // A repeated request id returns the earlier submission without planning
-    // again; its job may hold the very locks `--now` would check.
-    let repeated = match &req.request_id {
-        Some(rid) => store.submission_by_request(rid)?.is_some(),
-        None => false,
-    };
-    let plan = if repeated {
-        Default::default()
-    } else {
-        plan::plan(&s, &store, &req, &command)?
-    };
+    let store = s.store();
+    let plan = plan::plan(&s, &store, &req, &command)?;
     let new = NewSubmission {
         entry: req.entry,
         command,
@@ -284,24 +256,14 @@ async fn submit(State(s): State<AppState>, Json(req): Json<SubmitRequest>) -> Ap
             .into_owned(),
         cwd: req.cwd,
         session_id: req.session,
-        agent: req.agent,
-        invocation_key: req.invocation_key,
-        request_id: req.request_id,
-        sandbox_signature: req.sandbox_signature,
-        service: req.service,
-        options: serde_json::Value::Object(options),
         launcher: req.launcher_pid.zip(req.launcher_start),
         plan,
     };
+    let mut store = store;
     let created = store.create_submission(&new)?;
     drop(store);
     s.notify();
-    let status = if created.existing {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(created)).into_response())
+    Ok((StatusCode::CREATED, Json(created)).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -404,7 +366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_bad_and_conflicting_requests() {
+    async fn rejects_bad_requests() {
         let app = app();
         let (st, _) = call(
             &app,
@@ -414,21 +376,17 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        let body =
-            |src: &str| json!({"entry": "sh", "source": src, "cwd": "/w", "request_id": "r"});
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/jobs",
+            Some(json!({"entry": "sh", "source": "make", "cwd": "/w", "urgency": "high"})),
+        )
+        .await;
         assert_eq!(
-            call(&app, "POST", "/v1/jobs", Some(body("make"))).await.0,
-            StatusCode::CREATED
-        );
-        assert_eq!(
-            call(&app, "POST", "/v1/jobs", Some(body("make"))).await.0,
-            StatusCode::OK
-        );
-        assert_eq!(
-            call(&app, "POST", "/v1/jobs", Some(body("make test")))
-                .await
-                .0,
-            StatusCode::CONFLICT
+            st,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown fields are rejected"
         );
         assert_eq!(
             call(&app, "GET", "/v1/submissions/s_nope", None).await.0,

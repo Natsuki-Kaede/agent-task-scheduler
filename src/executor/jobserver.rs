@@ -1,21 +1,16 @@
 //! A job's jobserver pool (design 10.5), held by its executor: a fifo in
 //! the form of make 4.4 (`--jobserver-auth=fifo:PATH`), which make, ninja
 //! 1.13+ and cargo use. Each client also runs one job without a token.
-//! Lowering the target takes tokens back only as clients return them.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
 pub struct Pool {
     pub path: PathBuf,
     fd: i32,
-    target: Arc<AtomicU32>,
 }
 
 impl Pool {
@@ -37,11 +32,7 @@ impl Pool {
             return Err(std::io::Error::last_os_error())
                 .with_context(|| format!("opening {}", path.display()));
         }
-        let pool = Pool {
-            path,
-            fd,
-            target: Arc::new(AtomicU32::new(tokens)),
-        };
+        let pool = Pool { path, fd };
         pool.put(tokens)?;
         Ok(pool)
     }
@@ -68,51 +59,6 @@ impl Pool {
         }
         Ok(())
     }
-
-    /// Takes up to `n` tokens, waiting until clients return at least one.
-    /// A blocked read gets returned tokens ahead of a client that would
-    /// read them back in its own loop, which polling does not; reading all
-    /// that are there at once keeps up with clients returning several.
-    fn take(&self, n: u32) -> u32 {
-        let mut buf = vec![0u8; n as usize];
-        // SAFETY: reads at most `n` bytes into `buf`.
-        let r = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
-        r.max(0) as u32
-    }
-
-    /// The handle the executor uses to change the target.
-    pub fn target(&self) -> Arc<AtomicU32> {
-        self.target.clone()
-    }
-
-    /// Keeps the pool at the target until `done` is set: puts tokens back
-    /// at once, takes them only as clients return them (design 10.5:
-    /// lent tokens cannot be recalled). Call [`Pool::finish`] to end it.
-    pub fn regulate(&self, initial: u32, done: &std::sync::atomic::AtomicBool) {
-        let mut current = initial;
-        while !done.load(Ordering::Relaxed) {
-            let target = self.target.load(Ordering::Relaxed);
-            if target < current {
-                let took = self.take(current - target);
-                // The target may have risen while waiting.
-                let keep = took.min(current.saturating_sub(self.target.load(Ordering::Relaxed)));
-                if took > keep {
-                    let _ = self.put(took - keep);
-                }
-                current -= keep;
-                continue;
-            }
-            if target > current && self.put(target - current).is_ok() {
-                current = target;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-
-    /// Wakes a regulator waiting for a token after `done` is set.
-    pub fn finish(&self) {
-        let _ = self.put(1);
-    }
 }
 
 impl Drop for Pool {
@@ -126,7 +72,6 @@ impl Drop for Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
 
     /// Tokens a client can take now, read without blocking and returned.
     fn available(path: &std::path::Path) -> usize {
@@ -145,30 +90,16 @@ mod tests {
     }
 
     #[test]
-    fn follows_the_target() {
+    fn holds_its_tokens_and_removes_the_fifo() {
         let dir = tempfile::tempdir().unwrap();
-        let pool = Arc::new(Pool::create(dir.path(), "j", 5).unwrap());
+        let pool = Pool::create(dir.path(), "j", 5).unwrap();
         assert_eq!(available(&pool.path), 5);
-        let done = Arc::new(AtomicBool::new(false));
-        let regulator = {
-            let (pool, done) = (pool.clone(), done.clone());
-            std::thread::spawn(move || pool.regulate(5, &done))
-        };
-        pool.target().store(2, Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(800));
-        assert_eq!(available(&pool.path), 2, "three tokens taken back");
-        pool.target().store(4, Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(500));
-        assert_eq!(available(&pool.path), 4, "two put back");
-        // Waiting for a token that never comes back still ends.
-        pool.target().store(0, Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(300));
-        done.store(true, Ordering::Relaxed);
-        pool.finish();
-        regulator.join().unwrap();
-        assert!(
-            pool.makeflags(4)
-                .ends_with(&format!("fifo:{}", pool.path.display()))
+        assert_eq!(
+            pool.makeflags(5),
+            format!(" -j6 --jobserver-auth=fifo:{}", pool.path.display())
         );
+        let path = pool.path.clone();
+        drop(pool);
+        assert!(!path.exists());
     }
 }

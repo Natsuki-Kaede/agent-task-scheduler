@@ -1,20 +1,9 @@
-//! Clocks (design 9.6). `elapsed` includes system sleep and drives the
-//! bounded wait; `awake` excludes sleep and drives the freeze alert. Both
-//! ignore wall-clock adjustments. Their origins differ (on macOS by a few
-//! seconds even without sleep), so only compare readings of the same clock.
+//! The elapsed clock: time since boot including system sleep, unaffected
+//! by wall-clock changes. Bounded waits count sleep (design 5.2).
 
 use std::time::Duration;
 
-#[cfg(target_os = "macos")]
-const ELAPSED_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC; // keeps counting during sleep on macOS
-#[cfg(target_os = "macos")]
-const AWAKE_CLOCK: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
-
-#[cfg(target_os = "linux")]
-const ELAPSED_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
-#[cfg(target_os = "linux")]
-const AWAKE_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
-
+// CLOCK_MONOTONIC keeps counting during sleep on macOS.
 fn read(clock: libc::clockid_t) -> Duration {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -28,12 +17,7 @@ fn read(clock: libc::clockid_t) -> Duration {
 
 /// Time since boot, including sleep.
 pub fn elapsed() -> Duration {
-    read(ELAPSED_CLOCK)
-}
-
-/// Time since boot, excluding sleep.
-pub fn awake() -> Duration {
-    read(AWAKE_CLOCK)
+    read(libc::CLOCK_MONOTONIC)
 }
 
 /// A point in time measured on the elapsed clock.
@@ -61,11 +45,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clocks_advance() {
-        let (e1, a1) = (elapsed(), awake());
+    fn clock_advances() {
+        let e1 = elapsed();
         std::thread::sleep(Duration::from_millis(20));
-        let (e2, a2) = (elapsed(), awake());
-        assert!(e2 > e1 && a2 > a1);
+        assert!(elapsed() > e1);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Redaction of secret-looking values before a command is stored or shown
-//! (design 13).
+//! (design 11).
 
 const SECRET_WORDS: &[&str] = &[
     "token",

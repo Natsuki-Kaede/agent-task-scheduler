@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 const BUILTIN: &str = include_str!("../profiles/builtin.toml");
 
 /// Load class (design 8.2). Light also needs no writes for a line to skip
-/// the queue (design 6.3).
+/// the queue (design 6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Class {
@@ -19,49 +19,19 @@ pub enum Class {
     Heavy,
 }
 
-/// What a command writes, for locks (design 10.7).
+/// What a command writes, for locks (design 10.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Writes {
-    /// Read-only.
+    /// Nothing that needs a lock: the default.
+    #[default]
     None,
     /// The paths given as its positional arguments.
     Args,
     /// The paths listed in `write_paths`, relative to the project root.
     Paths,
-    /// Anywhere in the project: the conservative default.
-    #[default]
+    /// Anywhere in the project.
     Project,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Resources {
-    /// Typical peak private memory.
-    #[serde(default, deserialize_with = "size")]
-    pub mem: Option<u64>,
-    /// CPU cores it keeps busy; 0 means all.
-    pub cpu: Option<f64>,
-    /// Memory outside the private footprint, such as GPU or driver
-    /// allocations (design 10.1).
-    #[serde(default, deserialize_with = "size")]
-    pub extra: Option<u64>,
-    #[serde(default)]
-    pub disk: bool,
-    pub gpu: Option<String>,
-    #[serde(default)]
-    pub network: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Merge {
-    /// One run can serve several equal submissions (design 10.4).
-    #[serde(default)]
-    pub allowed: bool,
-    /// The inputs a run reads, which equal submissions must share.
-    #[serde(default)]
-    pub inputs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -74,19 +44,6 @@ pub struct Parallelism {
     pub flag: Option<String>,
     #[serde(default)]
     pub jobserver: bool,
-}
-
-/// A helper process that leaves the job's process tree (design 8.2).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Daemon {
-    pub name: String,
-    #[serde(default)]
-    pub shared: bool,
-}
-
-fn yes() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,8 +70,10 @@ pub struct Profile {
     /// A light command reading a larger file is medium instead.
     #[serde(default, deserialize_with = "size")]
     pub max_input: Option<u64>,
-    #[serde(default)]
-    pub resources: Resources,
+    /// Typical peak memory, including allocations outside the private
+    /// range such as GPU memory.
+    #[serde(default, deserialize_with = "size")]
+    pub mem: Option<u64>,
     #[serde(default)]
     pub writes: Writes,
     #[serde(default)]
@@ -127,13 +86,7 @@ pub struct Profile {
     #[serde(default)]
     pub service: bool,
     #[serde(default)]
-    pub merge: Merge,
-    #[serde(default = "yes")]
-    pub freezable: bool,
-    #[serde(default)]
     pub parallelism: Parallelism,
-    #[serde(default)]
-    pub daemons: Vec<Daemon>,
 }
 
 #[derive(Deserialize)]
@@ -271,10 +224,6 @@ impl Profiles {
         Self::load(None).expect("built-in profiles parse")
     }
 
-    pub fn all(&self) -> &[Profile] {
-        &self.list
-    }
-
     /// The most specific profile for `argv`; on a tie, the one loaded later.
     pub fn find(&self, argv: &[String]) -> Option<&Profile> {
         self.list
@@ -343,7 +292,7 @@ name = "cargo-build"
 program = ["cargo"]
 subcommand = ["build"]
 class = "medium"
-resources = { mem = "1G" }
+mem = "1G"
 
 [[profile]]
 name = "mytool"
@@ -354,10 +303,7 @@ class = "heavy"
         .unwrap();
         let p = Profiles::load(Some(dir.path())).unwrap();
         let cargo = p.find(&argv("cargo build")).unwrap();
-        assert_eq!(
-            (cargo.class, cargo.resources.mem),
-            (Class::Medium, Some(1 << 30))
-        );
+        assert_eq!((cargo.class, cargo.mem), (Class::Medium, Some(1 << 30)));
         assert_eq!(name(&p, "mytool").as_deref(), Some("mytool"));
     }
 

@@ -1,5 +1,5 @@
 //! Client commands: `ats run`, `wait`, `status`, `logs`, `cancel`, `detach`
-//! and the return contract of design 5.5.
+//! and the return contract of design 5.4.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,15 +32,7 @@ const WAIT_CHUNK: Duration = Duration::from_secs(30);
 const FOLLOW_POLL: Duration = Duration::from_millis(500);
 const RECONNECT_PAUSE: Duration = Duration::from_millis(500);
 
-/// Identity and correlation fields an adapter's hook adds (design 6.7).
-pub struct Identity {
-    pub session: Option<String>,
-    pub tool: Option<String>,
-    pub call: Option<String>,
-    pub request_id: Option<String>,
-}
-
-/// Scheduling options of `ats run` (design 5.3).
+/// Scheduling options of `ats run` (design 5.2).
 #[derive(clap::Args, Debug, Default)]
 pub struct RunOptions {
     /// Run only after these jobs or submissions succeed (comma-separated).
@@ -53,23 +45,9 @@ pub struct RunOptions {
     /// Also lock this path or named resource, such as a device or port.
     #[arg(long, value_delimiter = ',')]
     pub lock: Vec<String>,
-    /// Expected use, such as mem=6G,cpu=4; used where higher than predicted.
+    /// Expected memory, such as mem=6G; used where higher than predicted.
     #[arg(long)]
     pub hint: Option<String>,
-    #[arg(long, value_parser = ["low", "normal", "high"])]
-    pub urgency: Option<String>,
-    /// Why the urgency is needed.
-    #[arg(long, requires = "urgency")]
-    pub reason: Option<String>,
-    /// Under memory pressure, slow it down but never freeze it.
-    #[arg(long)]
-    pub no_freeze: bool,
-    /// Do not share a run with an equal job already running.
-    #[arg(long)]
-    pub no_merge: bool,
-    /// A long-running service rather than a command that ends.
-    #[arg(long)]
-    pub service: bool,
 }
 
 fn expect_ok(answer: Answer) -> Result<Value> {
@@ -138,7 +116,7 @@ fn exit_code(code: i64) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-/// The one-line status printed instead of command output (design 5.5 ③).
+/// The one-line status printed instead of command output (design 5.4).
 fn status_line(sub: &Value) -> String {
     let log = sub["log_path"].as_str().unwrap_or("not started yet");
     format!(
@@ -154,7 +132,7 @@ fn read_log(dir: &Path, name: &str) -> Vec<u8> {
     std::fs::read(dir.join(name)).unwrap_or_default()
 }
 
-/// Writes the command's own output unchanged (design 5.5 ②).
+/// Writes the command's own output unchanged (design 5.4).
 fn print_output(sub: &Value) -> Result<()> {
     if let Some(dir) = sub["log_path"].as_str() {
         let dir = Path::new(dir);
@@ -193,37 +171,28 @@ pub async fn run(
     paths: &Paths,
     spec: RunSpec,
     wait: Option<Duration>,
-    id: Identity,
+    session: Option<String>,
     options: RunOptions,
 ) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
     let mut body = json!({
         "cwd": cwd,
-        "session": id.session,
-        "agent": id.tool,
-        "invocation_key": id.call,
-        "request_id": id.request_id,
+        "session": session,
         "launcher_pid": std::process::id(),
         "launcher_start": procinfo::start_time(std::process::id() as i32),
         "after": options.after,
         "now": options.now,
         "lock": options.lock,
         "hint": options.hint,
-        "urgency": options.urgency,
-        "reason": options.reason,
-        "no_freeze": options.no_freeze,
-        "no_merge": options.no_merge,
-        "service": options.service,
     });
     match &spec {
         RunSpec::Argv { argv } => {
             body["entry"] = json!("argv");
             body["argv"] = json!(argv);
         }
-        RunSpec::Sh { source, shell } => {
+        RunSpec::Sh { source, .. } => {
             body["entry"] = json!("sh");
             body["source"] = json!(source);
-            body["shell"] = json!(shell);
         }
     }
     let (answer, _) = client::call(paths, "POST", "/v1/jobs", Some(body)).await?;
@@ -237,33 +206,29 @@ pub async fn run(
         created["job"].as_str().unwrap_or_default(),
     );
 
-    // A repeated request id returns the earlier submission; its job already
-    // has an executor (design 6.7 ⑥).
-    if created["existing"] != true {
-        match executor::spawn_detached(job, &spec, &cwd) {
-            // Register the executor before this process can exit, so the
-            // job always has a known starter (the executor registers too).
-            Ok(pid) => {
-                if let Some(start) = procinfo::start_time(pid) {
-                    let body = json!({ "pid": pid, "start": start });
-                    client::call(
-                        paths,
-                        "POST",
-                        &format!("/v1/jobs/{job}/executor"),
-                        Some(body),
-                    )
-                    .await?;
-                }
-            }
-            Err(e) => {
-                post(
+    match executor::spawn_detached(job, &spec, &cwd) {
+        // Register the executor before this process can exit, so the job
+        // always has a known starter (the executor registers too).
+        Ok(pid) => {
+            if let Some(start) = procinfo::start_time(pid) {
+                let body = json!({ "pid": pid, "start": start });
+                client::call(
                     paths,
-                    &format!("/v1/jobs/{job}/finished"),
-                    json!({ "state": "start_failed", "exit_code": null }),
+                    "POST",
+                    &format!("/v1/jobs/{job}/executor"),
+                    Some(body),
                 )
                 .await?;
-                return Err(e);
             }
+        }
+        Err(e) => {
+            post(
+                paths,
+                &format!("/v1/jobs/{job}/finished"),
+                json!({ "state": "start_failed", "exit_code": null }),
+            )
+            .await?;
+            return Err(e);
         }
     }
 
@@ -297,22 +262,20 @@ fn terminal_line(sub: &Value) -> String {
     )
 }
 
-/// Reports a submission's terminal state, attaches log tails on failure,
-/// and records that the state was retrieved (design 5.5).
-async fn report_terminal(paths: &Paths, sub: &Value) -> Result<ExitCode> {
+/// Reports a submission's terminal state and attaches log tails on
+/// failure (design 5.4).
+fn report_terminal(sub: &Value) -> ExitCode {
     eprintln!("{}", terminal_line(sub));
     if failed(sub) {
         print_tails(sub["log_path"].as_str());
     }
-    let id = sub["id"].as_str().unwrap_or_default();
-    post(paths, &format!("/v1/submissions/{id}/retrieved"), json!({})).await?;
-    Ok(match sub["exit_code"].as_i64() {
+    match sub["exit_code"].as_i64() {
         Some(code) => exit_code(code),
         None => ExitCode::from(1),
-    })
+    }
 }
 
-/// Reports a job held back by a failed predecessor (design 5.5: 76).
+/// Reports a job held back by a failed predecessor (design 5.4: 76).
 async fn blocked(paths: &Paths, sub: &Value) -> Result<ExitCode> {
     let job = sub["job"].as_str().unwrap_or_default();
     let why = get(paths, &format!("/v1/jobs/{job}/why")).await?;
@@ -325,57 +288,38 @@ async fn blocked(paths: &Paths, sub: &Value) -> Result<ExitCode> {
     Ok(ExitCode::from(EXIT_BLOCKED))
 }
 
-/// `ats wait`: waits for the job's terminal state (design 5.4, 6.7 ⑧).
+/// `ats wait`: waits for the job's terminal state (design 5.3).
 pub async fn wait(paths: &Paths, submission: &str, wait: Option<Duration>) -> Result<ExitCode> {
     let (reached, sub) = wait_for(paths, submission, "terminal", wait).await?;
     if sub["job_state"] == "blocked" {
         return blocked(paths, &sub).await;
     }
     if reached {
-        return report_terminal(paths, &sub).await;
+        return Ok(report_terminal(&sub));
     }
     eprintln!("{}", status_line(&sub));
     Ok(ExitCode::from(EXIT_DETACHED))
 }
 
-/// `ats status <id>` / `ats status --request <id>`.
-pub async fn status_one(
-    paths: &Paths,
-    id: Option<&str>,
-    request: Option<&str>,
-    json_out: bool,
-) -> Result<ExitCode> {
-    let row = match (id, request) {
-        (_, Some(rid)) => get(paths, &format!("/v1/requests/{rid}")).await?,
-        (Some(id), None) if id.starts_with("j_") => get(paths, &format!("/v1/jobs/{id}")).await?,
-        (Some(id), None) => get(paths, &format!("/v1/submissions/{id}")).await?,
-        (None, None) => unreachable!("caller passes an id or a request id"),
+/// `ats status <id>`: a submission or a job.
+pub async fn status_one(paths: &Paths, id: &str, json_out: bool) -> Result<ExitCode> {
+    let row = if id.starts_with("j_") {
+        get(paths, &format!("/v1/jobs/{id}")).await?
+    } else {
+        get(paths, &format!("/v1/submissions/{id}")).await?
     };
     if json_out {
         println!("{}", serde_json::to_string_pretty(&row)?);
-    }
-    // A job row has no submission; the retrieved marker is per submission.
-    if row.get("job_state").is_none() {
-        if !json_out {
-            println!(
-                "{} {} {}",
-                row["id"].as_str().unwrap_or("?"),
-                row["state"].as_str().unwrap_or("?"),
-                row["command"].as_str().unwrap_or("")
-            );
-        }
-        return Ok(ExitCode::SUCCESS);
-    }
-    if row["job_state"].as_str().is_some_and(is_terminal) {
-        if json_out {
-            let id = row["id"].as_str().unwrap_or_default();
-            post(paths, &format!("/v1/submissions/{id}/retrieved"), json!({})).await?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        report_terminal(paths, &row).await?;
-        return Ok(ExitCode::SUCCESS);
-    }
-    if !json_out {
+    } else if row.get("job_state").is_none() {
+        println!(
+            "{} {} {}",
+            row["id"].as_str().unwrap_or("?"),
+            row["state"].as_str().unwrap_or("?"),
+            row["command"].as_str().unwrap_or("")
+        );
+    } else if row["job_state"].as_str().is_some_and(is_terminal) {
+        report_terminal(&row);
+    } else {
         println!("{}", status_line(&row));
     }
     Ok(ExitCode::SUCCESS)
@@ -475,9 +419,8 @@ fn explain(v: &Value) -> String {
             "the daemon restarted and is waiting for running jobs to reconnect".into()
         }
         (_, Some("pressure")) => "memory pressure is rising, so nothing new is admitted".into(),
-        (_, Some("interval")) => {
-            "the last admitted job is still settling; admissions are spaced a few seconds apart"
-                .into()
+        (_, Some("settling")) => {
+            "the jobs just admitted are still settling; their memory is not measured yet".into()
         }
         (_, Some("no_executor")) => "its executor has not registered yet".into(),
         (_, Some("dependency")) => format!(
@@ -494,11 +437,6 @@ fn explain(v: &Value) -> String {
             gib(r["need"].as_f64().unwrap_or(0.0)),
             gib(r["free"].as_f64().unwrap_or(0.0).max(0.0))
         ),
-        (_, Some("cpu")) => format!(
-            "it needs {:.1} cores and {:.1} are free",
-            r["need"].as_f64().unwrap_or(0.0),
-            r["free"].as_f64().unwrap_or(0.0)
-        ),
         (_, Some("behind")) => format!(
             "{} is first in line and this would delay it",
             r["head"].as_str().unwrap_or("?")
@@ -507,7 +445,7 @@ fn explain(v: &Value) -> String {
     }
 }
 
-/// `ats why`: why a job is still waiting (design 5.4).
+/// `ats why`: why a job is still waiting (design 5.3).
 pub async fn why(paths: &Paths, id: &str) -> Result<ExitCode> {
     let job = job_of(paths, id).await?;
     let w = get(paths, &format!("/v1/jobs/{job}/why")).await?;
@@ -519,7 +457,7 @@ pub async fn why(paths: &Paths, id: &str) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `ats unblock`: runs a job whose predecessor failed (design 5.4).
+/// `ats unblock`: runs a job whose predecessor failed (design 5.3).
 pub async fn unblock(paths: &Paths, id: &str) -> Result<ExitCode> {
     let job = job_of(paths, id).await?;
     post(paths, &format!("/v1/jobs/{job}/unblock"), json!({})).await?;
