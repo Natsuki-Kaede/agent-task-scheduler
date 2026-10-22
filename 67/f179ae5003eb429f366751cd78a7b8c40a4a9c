@@ -1,12 +1,12 @@
-profiles/builtin.toml
-  s_bb9527a6cd4695::t_22242ec8d95bba 389,408
 src/sched/locks.rs
   s_bb9527a6cd4695::t_22242ec8d95bba 261
+profiles/builtin.toml
+  s_bb9527a6cd4695::t_22242ec8d95bba 389,408
 ---
 {
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "1.7.5",
-  "base_commit_sha": "1a14b1c0ee147bb0b4cc055750285f7a62cf1e3d",
+  "base_commit_sha": "67f179ae5003eb429f366751cd78a7b8c40a4a9c",
   "prompts": {},
   "sessions": {
     "s_bb9527a6cd4695": {
