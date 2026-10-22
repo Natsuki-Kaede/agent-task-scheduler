@@ -21,6 +21,7 @@ use crate::profile::Profiles;
 use crate::redact;
 use crate::sample::Snapshot;
 use crate::sched::Verdict;
+use crate::sched::pressure::PressureStatus;
 use crate::store::{Conflict, Entry, NewSubmission, NotFound, RequestIdConflict, Store};
 use crate::timing::Deadline;
 
@@ -45,6 +46,8 @@ pub struct AppState {
     awaited: Arc<Mutex<HashMap<String, usize>>>,
     /// The scheduler's latest verdict on each waiting job, for `ats why`.
     pub verdicts: Arc<Mutex<HashMap<String, Verdict>>>,
+    /// The pressure level and what it is doing (design 11).
+    pub pressure: Arc<Mutex<PressureStatus>>,
 }
 
 /// Counts a wait on a job while it lasts.
@@ -79,6 +82,7 @@ impl AppState {
             wrappers: Arc::new(Vec::new()),
             awaited: Arc::new(Mutex::new(HashMap::new())),
             verdicts: Arc::new(Mutex::new(HashMap::new())),
+            pressure: Arc::new(Mutex::new(PressureStatus::default())),
         }
     }
 
@@ -155,6 +159,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/jobs", get(list_jobs).post(submit))
         .route("/v1/submissions/{id}", get(submission))
         .route("/v1/measurements", get(measurements))
+        .route("/v1/pressure", get(pressure))
         .merge(lifecycle::routes())
         .with_state(state)
 }
@@ -323,6 +328,10 @@ async fn list_jobs(State(s): State<AppState>, Query(q): Query<ListQuery>) -> Api
 
 async fn measurements(State(s): State<AppState>) -> Json<Snapshot> {
     Json(s.measurements.lock().expect("measurements lock").clone())
+}
+
+async fn pressure(State(s): State<AppState>) -> Json<PressureStatus> {
+    Json(s.pressure.lock().expect("pressure lock").clone())
 }
 
 async fn submission(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {

@@ -21,7 +21,8 @@ pub struct Prediction {
     pub cores: f64,
     /// Run time, when every part of the line has history.
     pub seconds: Option<f64>,
-    /// Every command in the line may be frozen (design 11).
+    /// Every command in the line may be frozen (design 11): known, marked
+    /// freezable, and not transferring over the network.
     pub freezable: bool,
 }
 
@@ -281,9 +282,9 @@ pub fn predict(
     need.seconds = line.seconds.or(need.seconds);
     let freezable = analysis.structure.is_some()
         && analysis.segments.iter().all(|s| {
-            profiles
-                .find(&s.argv)
-                .is_some_and(|p| Some(&p.name) == s.profile.as_ref() && p.freezable)
+            profiles.find(&s.argv).is_some_and(|p| {
+                Some(&p.name) == s.profile.as_ref() && p.freezable && !p.resources.network
+            })
         });
     Prediction {
         private: need.mem.max(hint.mem.unwrap_or(0)),

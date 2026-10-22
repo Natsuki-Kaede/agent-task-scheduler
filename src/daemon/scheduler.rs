@@ -8,7 +8,6 @@ use anyhow::Result;
 
 use crate::api::AppState;
 use crate::procinfo;
-use crate::sample::Snapshot;
 use crate::sched::{self, Capacity, Dep, Held, Round, Settings, Verdict, Waiting};
 use crate::store::Conflict;
 use crate::timing;
@@ -24,8 +23,6 @@ struct Calibration {
     /// C; the machine's memory when not set.
     memory_budget: Option<u64>,
     cpu_target: f64,
-    /// Swap-out pages per second that count as rising pressure.
-    swapout_rate: f64,
     settings: Settings,
 }
 
@@ -44,20 +41,9 @@ impl Calibration {
                 .get("memory_budget")
                 .and_then(|v| crate::profile::parse_size(v).ok()),
             cpu_target: num("cpu_target").unwrap_or(1.25),
-            swapout_rate: num("swapout_rate").unwrap_or(64.0),
             settings,
         }
     }
-}
-
-/// The ats pressure level for admission (design 11): 1 when memory
-/// pressure is rising (the system reports critical pressure, or it is
-/// swapping out faster than calibrated) or a job uses more than it
-/// reserved. The four-level response refines this.
-fn pressure(snapshot: &Snapshot, cal: &Calibration, over_reservation: bool) -> u8 {
-    let critical = snapshot.system.as_ref().is_some_and(|s| s.pressure >= 4);
-    let swapping = snapshot.rates.swap_outs >= cal.swapout_rate;
-    u8::from(critical || swapping || over_reservation)
 }
 
 fn seconds_since(rfc3339: &str) -> Option<f64> {
@@ -198,7 +184,14 @@ pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>
         capacity: &capacity,
         held: &held,
         waiting: &waiting,
-        pressure: pressure(&snapshot, &cal, over),
+        // The pressure loop's level, and level 1 at once for a job just
+        // found above its reservation (design 11).
+        pressure: state
+            .pressure
+            .lock()
+            .expect("pressure lock")
+            .level
+            .max(u8::from(over)),
         since_admission,
         admitting: state.admitting(),
         settings: &cal.settings,
@@ -257,33 +250,7 @@ pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sample::{Rates, System};
-
-    #[test]
-    fn pressure_rises_on_critical_level_swapping_or_overuse() {
-        let cal = Calibration::from(&HashMap::new());
-        let mut snap = Snapshot {
-            system: Some(System {
-                pressure: 2,
-                ..System::default()
-            }),
-            ..Snapshot::default()
-        };
-        assert_eq!(
-            pressure(&snap, &cal, false),
-            0,
-            "a steady warning level alone does not stop admission"
-        );
-        assert_eq!(pressure(&snap, &cal, true), 1);
-        snap.rates = Rates {
-            swap_outs: 100.0,
-            ..Rates::default()
-        };
-        assert_eq!(pressure(&snap, &cal, false), 1);
-        snap.rates = Rates::default();
-        snap.system.as_mut().unwrap().pressure = 4;
-        assert_eq!(pressure(&snap, &cal, false), 1);
-    }
+    use crate::sample::{Snapshot, System};
 
     fn submit(state: &AppState, mem: u64, after: &[&str]) -> String {
         use crate::sched::predict::Prediction;
@@ -395,17 +362,12 @@ mod tests {
 
     #[test]
     fn calibration_overrides() {
-        let map: HashMap<String, String> = [
-            ("memory_budget", "12G"),
-            ("admission_interval", "1"),
-            ("swapout_rate", "10"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+        let map: HashMap<String, String> = [("memory_budget", "12G"), ("admission_interval", "1")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         let cal = Calibration::from(&map);
         assert_eq!(cal.memory_budget, Some(12 << 30));
         assert_eq!(cal.settings.interval, 1.0);
-        assert_eq!(cal.swapout_rate, 10.0);
     }
 }

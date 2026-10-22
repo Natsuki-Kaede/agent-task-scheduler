@@ -18,6 +18,9 @@ pub struct Controls {
     /// Jobserver tokens to leave in the job's pool; the executor takes the
     /// rest back as they are returned.
     pub tokens: Option<u32>,
+    /// Set by the pressure response, which may also undo it; controls set
+    /// by hand stay until changed by hand.
+    pub by_pressure: bool,
 }
 
 impl Controls {

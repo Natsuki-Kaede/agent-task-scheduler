@@ -6,6 +6,20 @@ use rusqlite::{OptionalExtension, params};
 use super::{Conflict, HELD, Store, no_job};
 use crate::control::Controls;
 
+/// A job holding a lease, as the pressure response needs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeldControl {
+    pub id: String,
+    pub state: String,
+    pub freezable: bool,
+    pub jobserver_tokens: Option<u32>,
+    pub controls: Controls,
+    pub predicted_private: u64,
+    pub reserved_private: u64,
+    pub predicted_seconds: Option<f64>,
+    pub started_at: Option<String>,
+}
+
 /// What an executor is given with its lease.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LeaseTerms {
@@ -36,6 +50,53 @@ impl Store {
                 .and_then(|e| serde_json::from_str(&e).ok())
                 .unwrap_or_default(),
         })
+    }
+
+    pub fn held_for_pressure(&self) -> Result<Vec<HeldControl>> {
+        let held = HELD
+            .iter()
+            .map(|s| format!("'{s}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT j.id, j.state, j.freezable, l.jobserver_tokens, j.controls, j.predicted_private,
+                    j.reserved_private, j.predicted_seconds, j.started_at
+             FROM jobs j LEFT JOIN leases l ON l.job_id = j.id WHERE j.state IN ({held})"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok(HeldControl {
+                id: r.get(0)?,
+                state: r.get(1)?,
+                freezable: r.get(2)?,
+                jobserver_tokens: r.get(3)?,
+                controls: r
+                    .get::<_, Option<String>>(4)?
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .unwrap_or_default(),
+                predicted_private: r.get::<_, i64>(5)? as u64,
+                reserved_private: r.get::<_, i64>(6)? as u64,
+                predicted_seconds: r.get(7)?,
+                started_at: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Records a freeze alert once per job (design 11: frozen for 30 minutes
+    /// of awake time). Returns true when it was new.
+    pub fn alert_frozen(&mut self, job: &str, awake_secs: f64) -> Result<bool> {
+        let seen: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM job_events WHERE job_id = ?1 AND kind = 'freeze_alert')",
+            params![job],
+            |r| r.get(0),
+        )?;
+        if !seen {
+            self.conn.execute(
+                "INSERT INTO job_events (job_id, at, kind, detail) VALUES (?1, ?2, 'freeze_alert', ?3)",
+                params![job, super::now(), format!("{:.0}", awake_secs)],
+            )?;
+        }
+        Ok(!seen)
     }
 
     /// Whether SIGSTOP may be used on the job (design 11).
@@ -149,5 +210,34 @@ impl Store {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Entry, NewSubmission, Plan};
+
+    #[test]
+    fn freeze_alerts_are_recorded_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        let new = NewSubmission {
+            entry: Entry::Sh,
+            command: "make".into(),
+            cwd: "/w".into(),
+            project_root: "/w".into(),
+            session_id: None,
+            agent: None,
+            invocation_key: None,
+            request_id: None,
+            sandbox_signature: None,
+            service: false,
+            options: serde_json::json!({}),
+            launcher: None,
+            plan: Plan::default(),
+        };
+        let job = store.create_submission(&new).unwrap().job;
+        assert!(store.alert_frozen(&job, 1800.0).unwrap());
+        assert!(!store.alert_frozen(&job, 1900.0).unwrap());
     }
 }

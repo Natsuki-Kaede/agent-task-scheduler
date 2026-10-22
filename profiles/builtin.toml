@@ -1,4 +1,5 @@
-# Built-in tool profiles (design 8.2). Resource figures are starting points;
+# Built-in tool profiles (design 8.2). Tests are never frozen: timeouts
+# inside them would fail (design 11). Resource figures are starting points;
 # measured history replaces them after the first runs (design 8.3).
 # Files in the data directory's profiles.d/ add profiles or replace these by
 # name.
@@ -175,6 +176,7 @@ write_paths = ["target"]
 resources = { mem = "4G", cpu = 0, disk = true }
 merge = { allowed = true, inputs = ["project sources", "Cargo.lock", "environment", "test data"] }
 parallelism = { env = ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS"], flag = "-j", jobserver = true }
+freezable = false
 
 [[profile]]
 name = "cargo-check"
@@ -277,10 +279,19 @@ parallelism = { flag = "-j" }
 [[profile]]
 name = "go-build"
 program = ["go"]
-subcommand = ["build", "test", "run", "install", "vet", "generate"]
+subcommand = ["build", "run", "install", "vet", "generate"]
 class = "heavy"
 resources = { mem = "2G", cpu = 0, disk = true }
 parallelism = { env = ["GOMAXPROCS"], flag = "-p" }
+
+[[profile]]
+name = "go-test"
+program = ["go"]
+subcommand = ["test"]
+class = "heavy"
+resources = { mem = "2G", cpu = 0, disk = true }
+parallelism = { env = ["GOMAXPROCS"], flag = "-p" }
+freezable = false
 
 [[profile]]
 name = "go-mod"
@@ -314,6 +325,7 @@ program = ["jest", "vitest", "mocha", "playwright"]
 class = "heavy"
 resources = { mem = "3G", cpu = 0 }
 parallelism = { flag = "--max-workers" }
+freezable = false
 
 [[profile]]
 name = "js-bundle"
@@ -349,6 +361,7 @@ program = ["pytest", "py.test", "tox", "nox"]
 class = "heavy"
 resources = { mem = "1G", cpu = 1 }
 parallelism = { flag = "-n" }
+freezable = false
 
 [[profile]]
 name = "python-pytest"
@@ -356,6 +369,7 @@ program = ["python", "python3"]
 args_any = ["pytest"]
 class = "heavy"
 resources = { mem = "1G", cpu = 1 }
+freezable = false
 
 [[profile]]
 name = "python-repl"

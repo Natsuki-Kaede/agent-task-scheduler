@@ -3,6 +3,7 @@
 
 mod controller;
 mod lock;
+mod pressure;
 mod scheduler;
 mod supervisor;
 
@@ -91,6 +92,10 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
         let state = state.clone();
         std::thread::spawn(move || controller::run(&state))
     };
+    let responding = {
+        let state = state.clone();
+        std::thread::spawn(move || pressure::run(&state))
+    };
     tracing::info!(socket = %paths.socket.display(), requests = %paths.requests.display(), "ats daemon started");
 
     let stopping = state.clone();
@@ -105,6 +110,7 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
     channel.abort();
     let _ = sampling.join();
     let _ = controlling.join();
+    let _ = responding.join();
     let _ = std::fs::remove_file(&paths.socket);
     tracing::info!("ats daemon stopped");
     served.context("serving the API")

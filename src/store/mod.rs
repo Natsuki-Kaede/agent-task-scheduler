@@ -12,6 +12,8 @@ use crate::sched::locks::Lock;
 use crate::sched::predict::Prediction;
 
 mod control;
+
+pub use control::HeldControl;
 mod history;
 mod sched;
 
@@ -670,7 +672,6 @@ impl Store {
     }
 
     /// The settled total plus the open part, as of `awake_ns`.
-    #[allow(dead_code)] // used by the freeze alert (T9)
     pub fn interval_total(
         &self,
         job: &str,

@@ -382,6 +382,37 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
 
+  /v1/pressure:
+    get:
+      summary: The pressure level and the response
+      description: |
+        Level 0 normal, 1 admission stopped, 2 other jobs slowed, 3 freezable
+        jobs frozen (design 11). Also where memory goes: managed jobs,
+        shared build daemons, and other processes.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  level: { type: integer }
+                  signals:
+                    type: object
+                    properties:
+                      system_level: { type: integer }
+                      swap_ins: { type: number }
+                      swap_outs: { type: number }
+                      over_reservation: { type: boolean }
+                  calm_for: { type: number, description: Seconds at level 0 }
+                  managed: { type: integer }
+                  shared: { type: integer }
+                  unmanaged: { type: integer }
+                  source: { type: string, enum: [managed, unmanaged] }
+                  changes: { type: array, items: { type: array }, description: '[job, controls] pairs changed in the last second' }
+                  alerts: { type: array, items: { type: string }, description: Jobs frozen for more than 30 minutes of awake time }
+
   /v1/measurements:
     get:
       summary: The latest resource measurements
@@ -490,6 +521,7 @@ components:
         frozen: { type: boolean, default: false }
         duty: { type: [number, 'null'], description: Fraction of each second the job may run }
         tokens: { type: [integer, 'null'], description: Jobserver tokens to leave in the pool }
+        by_pressure: { type: boolean, default: false, description: Set by the pressure response, which may also undo it; controls set by hand stay }
 
     Verdict:
       type: object
