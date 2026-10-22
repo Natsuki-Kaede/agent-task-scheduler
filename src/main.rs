@@ -12,6 +12,7 @@ mod config;
 mod control;
 mod daemon;
 mod executor;
+mod hook;
 mod ids;
 mod paths;
 mod procinfo;
@@ -101,6 +102,11 @@ enum Command {
     Cancel { submission: String },
     /// Mark a submission as left to run in the background.
     Detach { submission: String },
+    /// Answer an agent hook: the hook input on stdin, the answer on stdout.
+    Hook {
+        agent: hook::Agent,
+        event: hook::Event,
+    },
     /// Show how a command line is recognized, as JSON.
     #[command(name = "__analyze", hide = true)]
     Analyze {
@@ -156,6 +162,12 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
                 },
                 None => runspec::RunSpec::Argv { argv },
             };
+            // Inside a job the command runs directly: queueing it would
+            // wait on the job that is already holding its memory (design 6.3).
+            if std::env::var_os(executor::JOB_ENV).is_some() {
+                use std::os::unix::process::CommandExt;
+                return Err(spec.command().exec().into());
+            }
             let wait = if no_wait { Duration::ZERO } else { wait };
             cli::run(&paths, spec, Some(wait), session, options).await
         }
@@ -184,6 +196,17 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Hook { agent, event } => match hook::run(&paths, agent, event)? {
+            hook::Answer::Nothing => Ok(ExitCode::SUCCESS),
+            hook::Answer::Json(out) => {
+                println!("{out}");
+                Ok(ExitCode::SUCCESS)
+            }
+            hook::Answer::Block(reason) => {
+                eprint!("{reason}");
+                Ok(ExitCode::from(2))
+            }
+        },
         Command::Analyze { sh, argv } => {
             let config = config::Config::load(&paths)?;
             let profiles = profile::Profiles::load(Some(&paths.profiles))?;
