@@ -17,6 +17,9 @@ pub struct Paths {
     pub socket: PathBuf,
     pub lock: PathBuf,
     pub logs: PathBuf,
+    pub config: PathBuf,
+    /// User tool profiles (design 8.2).
+    pub profiles: PathBuf,
     /// Request-file channel. It lives under the temporary directory because
     /// sandboxed agents can usually write there but not to the data
     /// directory (design 6.8).
@@ -49,6 +52,8 @@ impl Paths {
             socket: home.join("ats.sock"),
             lock: home.join("daemon.lock"),
             logs: home.join("logs"),
+            config: home.join("config.toml"),
+            profiles: home.join("profiles.d"),
             home,
             requests,
         }

@@ -5,11 +5,14 @@ mod api;
 mod channel;
 mod cli;
 mod client;
+mod config;
 mod daemon;
 mod executor;
 mod ids;
 mod paths;
 mod procinfo;
+mod profile;
+mod recognize;
 mod redact;
 mod runspec;
 mod store;
@@ -99,6 +102,14 @@ enum Command {
     Cancel { submission: String },
     /// Mark a submission as left to run in the background.
     Detach { submission: String },
+    /// Show how a command line is recognized, as JSON.
+    #[command(name = "__analyze", hide = true)]
+    Analyze {
+        #[arg(long, conflicts_with = "argv")]
+        sh: Option<String>,
+        #[arg(last = true, required_unless_present = "sh")]
+        argv: Vec<String>,
+    },
     /// Run one job's executor (started by `ats run`).
     #[command(name = "__executor", hide = true)]
     Executor {
@@ -177,6 +188,18 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             } else {
                 print_jobs(&answer.body);
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Analyze { sh, argv } => {
+            let config = config::Config::load(&paths)?;
+            let profiles = profile::Profiles::load(Some(&paths.profiles))?;
+            let recognizer = recognize::Recognizer::new(&profiles, &config.recognize.wrappers);
+            let cwd = std::env::current_dir()?;
+            let analysis = match sh {
+                Some(source) => recognizer.shell(&source, &cwd),
+                None => recognizer.argv(&argv, &cwd),
+            };
+            println!("{}", serde_json::to_string_pretty(&analysis)?);
             Ok(ExitCode::SUCCESS)
         }
         Command::Executor { job, spec } => {
