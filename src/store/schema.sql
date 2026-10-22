@@ -20,6 +20,9 @@ CREATE TABLE jobs (
     urgency             INTEGER NOT NULL DEFAULT 0, -- -1 low, 0 normal, 1 high
     pinned              INTEGER,                    -- manual queue position
     history_key         TEXT,                       -- tool and subcommand of a one-command line
+    parallel_env        TEXT,                       -- JSON list of variables set to the parallelism
+    jobserver           INTEGER NOT NULL DEFAULT 0, -- offer a jobserver pool
+    controls            TEXT,                       -- JSON: background QoS, freezing, duty cycle, tokens
     reserved_private    INTEGER NOT NULL DEFAULT 0,
     exit_code           INTEGER,
     main_exit_code      INTEGER,            -- main execution process result, an observation only

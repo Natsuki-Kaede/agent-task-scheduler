@@ -224,7 +224,7 @@ name = "make"
 program = ["make", "gmake"]
 class = "heavy"
 resources = { mem = "2G", cpu = 0, disk = true }
-parallelism = { env = ["MAKEFLAGS"], flag = "-j", jobserver = true }
+parallelism = { flag = "-j", jobserver = true }
 
 [[profile]]
 name = "ninja"

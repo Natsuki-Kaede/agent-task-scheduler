@@ -183,7 +183,7 @@ impl Store {
     /// Commits a lease with its reservation and budget record (design 7.3:
     /// before the executor is told). Only a queued job with a registered
     /// executor can be admitted.
-    pub fn admit(&mut self, job: &str, reserved: u64, extra: u64) -> Result<()> {
+    pub fn admit(&mut self, job: &str, reserved: u64, extra: u64, parallelism: u32) -> Result<()> {
         let tx = self.conn.transaction()?;
         let (state, executor): (String, Option<i64>) = tx
             .query_row(
@@ -197,9 +197,11 @@ impl Store {
             return Err(Conflict(format!("job {job} is {state} and cannot be admitted")).into());
         }
         let at = now();
+        // One implicit slot runs without a token (design 10.5).
         tx.execute(
-            "INSERT INTO leases (job_id, granted_at) VALUES (?1, ?2)",
-            params![job, at],
+            "INSERT INTO leases (job_id, granted_at, parallelism, jobserver_tokens)
+             SELECT ?1, ?2, ?3, CASE WHEN jobserver THEN ?3 - 1 END FROM jobs WHERE id = ?1",
+            params![job, at, parallelism],
         )?;
         tx.execute(
             "UPDATE jobs SET state = 'admitted', reserved_private = ?2 WHERE id = ?1",

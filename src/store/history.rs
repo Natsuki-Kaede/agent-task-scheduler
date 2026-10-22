@@ -82,8 +82,8 @@ mod tests {
         };
         let job = store.create_submission(&new).unwrap().job;
         store.set_executor(&job, 1, "t").unwrap();
-        store.admit(&job, 0, 0).unwrap();
-        store.set_started(&job, "/l", None).unwrap();
+        store.admit(&job, 0, 0, 1).unwrap();
+        store.set_started(&job, "/l", None, None).unwrap();
         store.record_exit_usage(&job, 1.0, Some(peak)).unwrap();
         store.finish(&job, state, Some(0)).unwrap();
     }

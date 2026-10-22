@@ -11,10 +11,11 @@ use serde::Serialize;
 use crate::sched::locks::Lock;
 use crate::sched::predict::Prediction;
 
+mod control;
 mod history;
 mod sched;
 
-pub use sched::PRE_LEASE;
+pub use sched::{HELD, PRE_LEASE};
 
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_VERSION: i64 = 1;
@@ -61,6 +62,10 @@ pub struct Plan {
     pub urgency: i8,
     /// Tool and subcommand of a one-command line, for history lookups.
     pub history_key: Option<String>,
+    /// Environment variables set to the leased parallelism (design 10.5).
+    pub parallel_env: Vec<String>,
+    /// The line runs jobserver clients, so the executor offers a pool.
+    pub jobserver: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -137,6 +142,8 @@ pub struct ActiveJob {
     /// The process that starts the executor, as (pid, start time).
     pub launcher: Option<(i64, String)>,
     pub main_exit_code: Option<i64>,
+    /// Every submission of the job is canceled.
+    pub canceled: bool,
 }
 
 fn process(pid: Option<i64>, start: Option<String>) -> Option<(i64, String)> {
@@ -247,9 +254,9 @@ impl Store {
             "INSERT INTO jobs (id, node_id, state, cwd, project_root, entry, command, service,
                                launcher_pid, launcher_start, created_at, profile, predicted_private,
                                predicted_extra, predicted_cores, freezable, run_now, urgency,
-                               predicted_seconds, history_key)
+                               predicted_seconds, history_key, parallel_env, jobserver)
              VALUES (?1, 'local', 'queued', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18)",
+                     ?17, ?18, ?19, ?20)",
             params![
                 job,
                 new.cwd,
@@ -269,6 +276,8 @@ impl Store {
                 new.plan.urgency,
                 new.plan.prediction.seconds,
                 new.plan.history_key,
+                serde_json::to_string(&new.plan.parallel_env)?,
+                new.plan.jobserver,
             ],
         )?;
         tx.execute(
@@ -505,7 +514,16 @@ impl Store {
     }
 
     /// Records that the command started in process group `pgid`.
-    pub fn set_started(&mut self, job: &str, log_path: &str, pgid: Option<i64>) -> Result<()> {
+    /// Records that the command started in process group `pgid`, with the
+    /// environment the executor added (design 10.5: kept in the job's
+    /// record).
+    pub fn set_started(
+        &mut self,
+        job: &str,
+        log_path: &str,
+        pgid: Option<i64>,
+        injected: Option<&str>,
+    ) -> Result<()> {
         if self.job(job)?.is_some_and(|j| j.state == "running") {
             return Ok(());
         }
@@ -515,7 +533,7 @@ impl Store {
             "state = 'running', started_at = ?1, log_path = ?2, pgid = ?3",
             &[&at, &log_path, &pgid],
             "started",
-            None,
+            injected,
         )
     }
 
@@ -609,7 +627,6 @@ impl Store {
 
     /// Starts counting awake time in `kind` (frozen or throttled), if not
     /// already counting. Readings are only comparable within one boot.
-    #[allow(dead_code)] // used by the freeze alert (T9)
     pub fn open_interval(
         &mut self,
         job: &str,
@@ -633,7 +650,6 @@ impl Store {
     /// Stops counting and adds the open part to the settled total. A part
     /// opened in another boot cannot be measured and marks the total as
     /// uncertain instead of being dropped silently.
-    #[allow(dead_code)] // used by the freeze alert (T9)
     pub fn close_interval(
         &mut self,
         job: &str,
@@ -705,7 +721,8 @@ impl Store {
     pub fn active_jobs(&self) -> Result<Vec<ActiveJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, state, executor_pid, executor_start, pgid, launcher_pid, launcher_start,
-                    main_exit_code
+                    main_exit_code,
+                    NOT EXISTS (SELECT 1 FROM submissions s WHERE s.job_id = jobs.id AND s.canceled = 0)
              FROM jobs WHERE state NOT IN (
                  'completed', 'start_failed', 'canceled', 'replaced',
                  'externally_terminated', 'ended_unknown')",
@@ -718,6 +735,7 @@ impl Store {
                 pgid: r.get(4)?,
                 launcher: process(r.get(5)?, r.get(6)?),
                 main_exit_code: r.get(7)?,
+                canceled: r.get(8)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)

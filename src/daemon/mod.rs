@@ -1,6 +1,7 @@
 //! The daemon: one instance per user, serving the API on a unix socket and
 //! through the request-file channel.
 
+mod controller;
 mod lock;
 mod scheduler;
 mod supervisor;
@@ -15,8 +16,8 @@ use crate::paths::Paths;
 use crate::procinfo;
 use crate::profile::Profiles;
 use crate::sample::{GroupUsage, JobRoot, Sampler};
-use crate::store::JobSample;
 use crate::store::{self, Store};
+use crate::store::{HELD, JobSample};
 
 /// How long leases wait after a restart for running executors to reconnect.
 /// They poll every half second, so this covers slow starts.
@@ -69,8 +70,9 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
     let watcher = {
         let state = state.clone();
         tokio::spawn(async move {
+            let mut terminating = std::collections::HashMap::new();
             loop {
-                if let Err(e) = supervisor::sweep(&state, &procs) {
+                if let Err(e) = supervisor::sweep(&state, &procs, &mut terminating) {
                     tracing::error!("checking executors: {e:#}");
                 }
                 tokio::time::sleep(SWEEP_EVERY).await;
@@ -85,6 +87,10 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
         })
     };
     let scheduling = tokio::spawn(scheduler::run(state.clone()));
+    let controlling = {
+        let state = state.clone();
+        std::thread::spawn(move || controller::run(&state))
+    };
     tracing::info!(socket = %paths.socket.display(), requests = %paths.requests.display(), "ats daemon started");
 
     let stopping = state.clone();
@@ -98,6 +104,7 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
     scheduling.abort();
     channel.abort();
     let _ = sampling.join();
+    let _ = controlling.join();
     let _ = std::fs::remove_file(&paths.socket);
     tracing::info!("ats daemon stopped");
     served.context("serving the API")
@@ -119,12 +126,7 @@ fn sample_loop(state: &AppState, mut sampler: Sampler) {
         };
         let roots: Vec<JobRoot> = jobs
             .iter()
-            .filter(|j| {
-                matches!(
-                    j.state.as_str(),
-                    "admitted" | "running" | "awaiting_takeover"
-                )
-            })
+            .filter(|j| HELD.contains(&j.state.as_str()))
             .map(|j| {
                 // A dead executor's id may belong to another process now.
                 let executor = j

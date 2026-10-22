@@ -7,7 +7,8 @@ use std::path::Path;
 use axum::http::StatusCode;
 
 use super::{ApiError, ApiResult, AppState, SubmitRequest, bad_request};
-use crate::recognize::Recognizer;
+use crate::profile::Profiles;
+use crate::recognize::{Analysis, Recognizer};
 use crate::sched::locks;
 use crate::sched::predict::{Defaults, Hint, Lookup, Stats, line_key, predict};
 use crate::store::{Entry, Plan, Store};
@@ -92,6 +93,13 @@ pub fn plan(s: &AppState, store: &Store, req: &SubmitRequest, command: &str) -> 
             )));
         }
     };
+    let (parallel_env, jobserver, explicit) = parallelism(&analysis, &s.profiles);
+    let mut prediction = prediction;
+    if let Some(n) = explicit {
+        prediction.cores = prediction.cores.max(n.min(cores));
+    }
+    // Some jobs must never be stopped (design 11).
+    prediction.freezable &= !req.no_freeze && !req.now;
     let mut profiles: Vec<String> = analysis
         .segments
         .iter()
@@ -107,11 +115,65 @@ pub fn plan(s: &AppState, store: &Store, req: &SubmitRequest, command: &str) -> 
         run_now: req.now,
         urgency,
         history_key: line_key(&analysis),
+        parallel_env,
+        jobserver,
     };
     if req.now {
         refuse_now_conflicts(store, &plan)?;
     }
     Ok(plan)
+}
+
+/// The value given to a parallelism flag such as `-j8`, `-j 8` or
+/// `--max-workers=4`; a bare `-j` means no limit.
+fn explicit_value(args: &[String], flag: &str) -> Option<f64> {
+    for (i, a) in args.iter().enumerate() {
+        let rest = if a == flag {
+            match args.get(i + 1).and_then(|n| n.parse::<f64>().ok()) {
+                Some(n) => return Some(n),
+                None => return Some(f64::INFINITY),
+            }
+        } else if let Some(r) = a.strip_prefix(flag) {
+            r.strip_prefix('=').unwrap_or(r)
+        } else {
+            continue;
+        };
+        if let Ok(n) = rest.parse::<f64>() {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Parallelism controls for a line (design 10.5): the variables to set to
+/// the leased parallelism and whether to offer a jobserver pool. A command
+/// that sets its own parallelism keeps it, and that becomes its CPU request.
+fn parallelism(analysis: &Analysis, profiles: &Profiles) -> (Vec<String>, bool, Option<f64>) {
+    let (mut env, mut jobserver, mut explicit) = (Vec::new(), false, None::<f64>);
+    for seg in &analysis.segments {
+        let Some(p) = profiles
+            .find(&seg.argv)
+            .filter(|p| Some(&p.name) == seg.profile.as_ref())
+        else {
+            continue;
+        };
+        if let Some(n) = p
+            .parallelism
+            .flag
+            .as_deref()
+            .and_then(|f| explicit_value(&seg.argv[1..], f))
+        {
+            explicit = Some(explicit.map_or(n, |e| e.max(n)));
+        }
+        env.extend(p.parallelism.env.iter().cloned());
+        jobserver |= p.parallelism.jobserver;
+    }
+    if explicit.is_some() {
+        return (Vec::new(), false, explicit);
+    }
+    env.sort();
+    env.dedup();
+    (env, jobserver, None)
 }
 
 /// `--now` runs at once unless something real stands in the way: a
@@ -142,4 +204,34 @@ fn refuse_now_conflicts(store: &Store, plan: &Plan) -> ApiResult<()> {
             conflicts.join("; ")
         ),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallelism_from_profiles() {
+        let profiles = Profiles::builtin();
+        let dir = tempfile::tempdir().unwrap();
+        let r = Recognizer::new(&profiles, &[]);
+        let par = |src: &str| parallelism(&r.shell(src, dir.path()), &profiles);
+        assert_eq!(
+            par("cargo build"),
+            (vec!["CARGO_BUILD_JOBS".to_string()], true, None)
+        );
+        assert_eq!(
+            par("make all && ninja"),
+            (vec![], true, None),
+            "make takes its jobs from the pool"
+        );
+        assert_eq!(
+            par("ninja -j8"),
+            (vec![], false, Some(8.0)),
+            "explicit parallelism is kept"
+        );
+        assert_eq!(par("make -j"), (vec![], false, Some(f64::INFINITY)));
+        assert_eq!(par("jest --max-workers=4"), (vec![], false, Some(4.0)));
+        assert_eq!(par("ls"), (vec![], false, None));
+    }
 }

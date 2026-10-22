@@ -2,10 +2,13 @@
 //! that waits for its lease, runs the command, keeps its output, and reports
 //! the main execution process result and the job's terminal state.
 
+mod jobserver;
 mod logwriter;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -54,9 +57,10 @@ async fn post(paths: &Paths, path: &str, body: serde_json::Value) -> Result<serd
     Ok(answer.body)
 }
 
-/// Registers this executor and waits for the lease. Returns false when the
-/// job ended before it could start, for example by being canceled.
-async fn acquire_lease(paths: &Paths, job: &str) -> Result<bool> {
+/// Registers this executor and waits for the lease. Returns the lease's
+/// terms, or `None` when the job ended before it could start, for example
+/// by being canceled.
+async fn acquire_lease(paths: &Paths, job: &str) -> Result<Option<serde_json::Value>> {
     let pid = std::process::id() as i32;
     let start = procinfo::start_time(pid).context("reading this process's start time")?;
     let answer = report(
@@ -67,7 +71,7 @@ async fn acquire_lease(paths: &Paths, job: &str) -> Result<bool> {
     .await;
     match answer.status {
         204 => {}
-        409 => return Ok(false),
+        409 => return Ok(None),
         s => bail!(
             "registering the executor: daemon answered {s}: {}",
             answer.body
@@ -81,10 +85,10 @@ async fn acquire_lease(paths: &Paths, job: &str) -> Result<bool> {
         )
         .await;
         match answer.status {
-            200 if answer.body["granted"] == true => return Ok(true),
+            200 if answer.body["granted"] == true => return Ok(Some(answer.body)),
             // The daemon already held the request while it waited.
             200 => {}
-            409 => return Ok(false),
+            409 => return Ok(None),
             s => bail!("asking for the lease: daemon answered {s}: {}", answer.body),
         }
     }
@@ -127,13 +131,72 @@ fn exit_code(status: std::process::ExitStatus) -> i64 {
 
 /// Runs one job to its terminal state.
 pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Result<()> {
-    if !acquire_lease(&paths, &job).await? {
+    let Some(terms) = acquire_lease(&paths, &job).await? else {
         return Ok(());
-    }
+    };
 
     let dir = log_dir(&paths, &job)?;
     let mut cmd = tokio::process::Command::from(spec.command());
-    cmd.current_dir(&cwd)
+    // Parallelism from the lease (design 10.5); what the submitter set
+    // itself stays.
+    let mut injected = serde_json::Map::new();
+    if let Some(n) = terms["parallelism"].as_u64() {
+        for var in terms["env"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+        {
+            if std::env::var_os(var).is_none() {
+                cmd.env(var, n.to_string());
+                injected.insert(var.into(), json!(n.to_string()));
+            }
+        }
+    }
+    let own_jobserver = ["MAKEFLAGS", "CARGO_MAKEFLAGS"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some());
+    let pool = match terms["jobserver_tokens"].as_u64() {
+        Some(tokens) if !own_jobserver => {
+            let pool = jobserver::Pool::create(
+                &std::env::temp_dir().join("ats").join("jobserver"),
+                &job,
+                tokens as u32,
+            )?;
+            let flags = pool.makeflags(tokens as u32);
+            cmd.env("MAKEFLAGS", &flags);
+            injected.insert("MAKEFLAGS".into(), json!(flags));
+            Some((Arc::new(pool), tokens as u32))
+        }
+        _ => None,
+    };
+    let regulating = Arc::new(AtomicBool::new(false));
+    let regulator = pool.clone().map(|(pool, tokens)| {
+        let done = regulating.clone();
+        std::thread::spawn(move || pool.regulate(tokens, &done))
+    });
+    let target = pool.as_ref().map(|(p, tokens)| (p.target(), *tokens));
+    let result = run_command(&paths, &job, cmd, &cwd, &dir, injected, target).await;
+    regulating.store(true, Ordering::Relaxed);
+    if let (Some(r), Some((pool, _))) = (regulator, &pool) {
+        pool.finish();
+        let _ = r.join();
+    }
+    result
+}
+
+/// Starts the command and follows it to its terminal state.
+async fn run_command(
+    paths: &Paths,
+    job: &str,
+    mut cmd: tokio::process::Command,
+    cwd: &Path,
+    dir: &Path,
+    injected: serde_json::Map<String, serde_json::Value>,
+    target: Option<(Arc<AtomicU32>, u32)>,
+) -> Result<()> {
+    let (paths, job) = (paths.clone(), job.to_string());
+    cmd.current_dir(cwd)
         .env(JOB_ENV, &job)
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
@@ -165,7 +228,7 @@ pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Resu
     post(
         &paths,
         &format!("/v1/jobs/{job}/started"),
-        json!({ "log_path": dir, "pgid": pgid }),
+        json!({ "log_path": dir, "pgid": pgid, "env": injected }),
     )
     .await?;
 
@@ -181,7 +244,7 @@ pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Resu
     let mut canceled = false;
     let main = tokio::select! {
         status = child.wait() => Some(exit_code(status?)),
-        () = wait_for_cancel(&paths, &job) => { canceled = true; None }
+        () = wait_for_cancel(&paths, &job, target.as_ref()) => { canceled = true; None }
     };
     if canceled {
         stop_group(pgid).await;
@@ -213,7 +276,7 @@ pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Resu
     while procinfo::group_alive(pgid) {
         tokio::select! {
             () = tokio::time::sleep(GROUP_POLL) => {}
-            () = wait_for_cancel(&paths, &job) => {
+            () = wait_for_cancel(&paths, &job, target.as_ref()) => {
                 stop_group(pgid).await;
                 post(&paths, &format!("/v1/jobs/{job}/finished"), ended("canceled", Some(main))).await?;
                 return Ok(());
@@ -252,20 +315,30 @@ fn ended(state: &str, exit_code: Option<i64>) -> serde_json::Value {
     })
 }
 
-async fn wait_for_cancel(paths: &Paths, job: &str) {
+/// Polls the daemon's control for a cancel, and follows its jobserver
+/// target (`tokens`, or the leased number when unset).
+async fn wait_for_cancel(paths: &Paths, job: &str, target: Option<&(Arc<AtomicU32>, u32)>) {
     loop {
         tokio::time::sleep(CONTROL_POLL).await;
-        if let Ok((answer, _)) =
+        let Ok((answer, _)) =
             client::call(paths, "GET", &format!("/v1/jobs/{job}/control"), None).await
-            && answer.body["cancel"] == true
-        {
+        else {
+            continue;
+        };
+        if answer.body["cancel"] == true {
             return;
+        }
+        if let Some((t, leased)) = target {
+            let want = answer.body["tokens"].as_u64().map_or(*leased, |n| n as u32);
+            t.store(want, Ordering::Relaxed);
         }
     }
 }
 
 async fn stop_group(pgid: i32) {
     procinfo::signal_group(pgid, libc::SIGTERM);
+    // A frozen process handles SIGTERM only once resumed.
+    procinfo::signal_group(pgid, libc::SIGCONT);
     let deadline = tokio::time::Instant::now() + TERM_GRACE;
     while procinfo::group_alive(pgid) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(GROUP_POLL).await;

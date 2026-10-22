@@ -4,12 +4,16 @@
 //! it while any of its processes live, and its exit code is unknown unless
 //! the executor reported the main result.
 
+use std::collections::HashMap;
+use std::time::Duration;
+
 use anyhow::Result;
 
 use crate::api::AppState;
 use crate::executor::JOB_ENV;
 use crate::procinfo;
 use crate::store::{ActiveJob, Conflict};
+use crate::timing;
 
 /// Process checks, replaceable in tests.
 pub trait Processes {
@@ -17,6 +21,8 @@ pub trait Processes {
     fn group_alive(&self, pgid: i64) -> bool;
     /// Whether any process carries the job's environment marker.
     fn marked(&self, job: &str) -> bool;
+    /// Asks the job's processes to end, or kills them when `force`.
+    fn terminate(&self, job: &ActiveJob, force: bool);
 }
 
 pub struct System;
@@ -33,11 +39,30 @@ impl Processes for System {
     fn marked(&self, job: &str) -> bool {
         !procinfo::with_env(JOB_ENV, job).is_empty()
     }
+
+    fn terminate(&self, job: &ActiveJob, force: bool) {
+        let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
+        let pids = procinfo::with_env(JOB_ENV, &job.id);
+        if let Some(g) = job.pgid {
+            procinfo::signal_group(g as i32, sig);
+            // A frozen process handles SIGTERM only once resumed.
+            procinfo::signal_group(g as i32, libc::SIGCONT);
+        }
+        for pid in pids {
+            // SAFETY: signals a process carrying this job's marker.
+            unsafe {
+                libc::kill(pid, sig);
+                libc::kill(pid, libc::SIGCONT);
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     AwaitTakeover,
+    /// Canceled while its executor is gone: the daemon stops it.
+    Terminate,
     Finish(&'static str, Option<i64>),
 }
 
@@ -63,11 +88,18 @@ pub fn check(job: &ActiveJob, procs: &impl Processes) -> Option<Action> {
     }
     let running = job.pgid.is_some_and(|g| procs.group_alive(g)) || procs.marked(&job.id);
     if running {
-        return (job.state != "awaiting_takeover").then_some(Action::AwaitTakeover);
+        return Some(if job.state != "awaiting_takeover" {
+            Action::AwaitTakeover
+        } else if job.canceled {
+            Action::Terminate
+        } else {
+            return None;
+        });
     }
-    Some(match job.main_exit_code {
-        Some(code) => Action::Finish("completed", Some(code)),
-        None => Action::Finish("ended_unknown", None),
+    Some(match (job.canceled, job.main_exit_code) {
+        (true, code) => Action::Finish("canceled", code),
+        (false, Some(code)) => Action::Finish("completed", Some(code)),
+        (false, None) => Action::Finish("ended_unknown", None),
     })
 }
 
@@ -83,15 +115,38 @@ pub fn live_executors(state: &AppState, procs: &impl Processes) -> Result<Vec<St
         .collect())
 }
 
-/// Applies [`check`] to every job that has not ended.
-pub fn sweep(state: &AppState, procs: &impl Processes) -> Result<()> {
+/// How long processes get to end after SIGTERM before SIGKILL.
+const TERM_GRACE: Duration = Duration::from_secs(5);
+
+/// Applies [`check`] to every job that has not ended. `terminating` holds
+/// when each canceled job was asked to end.
+pub fn sweep(
+    state: &AppState,
+    procs: &impl Processes,
+    terminating: &mut HashMap<String, Duration>,
+) -> Result<()> {
     let jobs = state.store().active_jobs()?;
+    terminating.retain(|id, _| jobs.iter().any(|j| &j.id == id));
     let mut changed = false;
     for job in jobs {
         let Some(action) = check(&job, procs) else {
             continue;
         };
         let applied = match &action {
+            Action::Terminate => {
+                let now = timing::elapsed();
+                match terminating.get(&job.id) {
+                    None => {
+                        procs.terminate(&job, false);
+                        terminating.insert(job.id.clone(), now);
+                    }
+                    Some(&asked) if now.saturating_sub(asked) >= TERM_GRACE => {
+                        procs.terminate(&job, true)
+                    }
+                    Some(_) => {}
+                }
+                continue;
+            }
             Action::AwaitTakeover => state.store().await_takeover(&job.id),
             Action::Finish(st, code) => state.store().finish(&job.id, st, *code),
         };
@@ -133,6 +188,7 @@ mod tests {
         fn marked(&self, job: &str) -> bool {
             self.marked.contains(job)
         }
+        fn terminate(&self, _: &ActiveJob, _: bool) {}
     }
 
     fn job(state: &str) -> ActiveJob {
@@ -143,6 +199,7 @@ mod tests {
             pgid: None,
             launcher: Some((20, "s".into())),
             main_exit_code: None,
+            canceled: false,
         }
     }
 
@@ -223,6 +280,24 @@ mod tests {
         assert_eq!(
             check(&j, &fake(&[], &[], false)),
             Some(Action::Finish("ended_unknown", None))
+        );
+    }
+
+    #[test]
+    fn a_canceled_takeover_job_is_stopped_then_ends_canceled() {
+        let mut j = job("awaiting_takeover");
+        j.pgid = Some(30);
+        j.canceled = true;
+        assert_eq!(check(&j, &fake(&[], &[30], false)), Some(Action::Terminate));
+        assert_eq!(
+            check(&j, &fake(&[], &[], false)),
+            Some(Action::Finish("canceled", None))
+        );
+        j.state = "running".into();
+        assert_eq!(
+            check(&j, &fake(&[], &[30], false)),
+            Some(Action::AwaitTakeover),
+            "first marked as taken over"
         );
     }
 }

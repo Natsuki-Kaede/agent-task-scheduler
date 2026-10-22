@@ -217,7 +217,9 @@ pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>
         match &verdict {
             Verdict::Admit => {
                 let w = by_id[id.as_str()];
-                match store.admit(&id, w.reserved, w.extra) {
+                // The leased parallelism: its predicted cores, within the machine.
+                let parallelism = w.cores.round().clamp(1.0, capacity.cores) as u32;
+                match store.admit(&id, w.reserved, w.extra, parallelism) {
                     Ok(()) => {
                         tracing::info!(job = %id, reserved = w.reserved, "admitted");
                         admissions.insert(id.clone(), now);

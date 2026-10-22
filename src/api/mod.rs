@@ -228,6 +228,9 @@ pub struct SubmitRequest {
     pub hint: Option<String>,
     /// `--urgency low|normal|high`.
     pub urgency: Option<String>,
+    /// `--no-freeze`: never stop it with SIGSTOP.
+    #[serde(default)]
+    pub no_freeze: bool,
     #[serde(flatten)]
     pub options: serde_json::Map<String, serde_json::Value>,
 }

@@ -6,6 +6,7 @@ mod channel;
 mod cli;
 mod client;
 mod config;
+mod control;
 mod daemon;
 mod executor;
 mod ids;

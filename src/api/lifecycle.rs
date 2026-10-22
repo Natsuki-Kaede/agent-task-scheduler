@@ -32,6 +32,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/jobs/{id}/why", get(why))
         .route("/v1/jobs/{id}/unblock", post(unblock))
         .route("/v1/jobs/{id}/pin", post(pin))
+        .route("/v1/jobs/{id}/controls", get(controls).post(set_controls))
 }
 
 fn ok() -> ApiResult<Response> {
@@ -97,7 +98,14 @@ async fn lease(
             ));
         }
         if row.state == "admitted" {
-            return Ok(Json(json!({ "granted": true })).into_response());
+            let terms = s.store().lease_terms(&id)?;
+            return Ok(Json(json!({
+                "granted": true,
+                "parallelism": terms.parallelism,
+                "jobserver_tokens": terms.jobserver_tokens,
+                "env": terms.env,
+            }))
+            .into_response());
         }
         if !PRE_LEASE.contains(&row.state.as_str()) {
             return Err(ApiError(
@@ -120,6 +128,9 @@ async fn lease(
 struct StartedBody {
     log_path: String,
     pgid: Option<i64>,
+    /// Environment the executor added, such as the jobserver.
+    #[serde(default)]
+    env: serde_json::Map<String, serde_json::Value>,
 }
 
 async fn started(
@@ -127,7 +138,9 @@ async fn started(
     Path(id): Path<String>,
     Json(b): Json<StartedBody>,
 ) -> ApiResult<Response> {
-    s.store().set_started(&id, &b.log_path, b.pgid)?;
+    let injected = (!b.env.is_empty()).then(|| serde_json::Value::Object(b.env).to_string());
+    s.store()
+        .set_started(&id, &b.log_path, b.pgid, injected.as_deref())?;
     s.notify();
     ok()
 }
@@ -180,8 +193,10 @@ async fn finished(
 /// connected.
 async fn control(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
     s.contact(&id);
-    let cancel = s.store().cancel_requested(&id)?;
-    Ok(Json(json!({ "cancel": cancel })).into_response())
+    let store = s.store();
+    let cancel = store.cancel_requested(&id)?;
+    let tokens = store.controls(&id)?.tokens;
+    Ok(Json(json!({ "cancel": cancel, "tokens": tokens })).into_response())
 }
 
 #[derive(Deserialize)]
@@ -336,7 +351,7 @@ mod tests {
         let lease_path = format!("/v1/jobs/{job}/lease");
         let lease = |pid: i64| call(&app, "POST", &lease_path, Some(json!({"pid": pid})));
         assert_eq!(lease(1).await.1["granted"], false);
-        state.store().admit(&job, 1 << 30, 0).unwrap();
+        state.store().admit(&job, 1 << 30, 0, 1).unwrap();
         // Asking again after a lost answer gets the same lease; only the
         // executor gets it.
         for _ in 0..2 {
@@ -474,6 +489,38 @@ async fn pin(
     Json(b): Json<PinBody>,
 ) -> ApiResult<Response> {
     s.store().pin(&id, b.rank)?;
+    s.notify();
+    ok()
+}
+
+async fn controls(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    Ok(Json(s.store().controls(&id)?).into_response())
+}
+
+/// Sets a job's background QoS, freezing, duty cycle and jobserver target
+/// (design 10.6, 11). The pressure response sets these; so can the
+/// dashboard.
+async fn set_controls(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(c): Json<crate::control::Controls>,
+) -> ApiResult<Response> {
+    if c.duty.is_some_and(|d| !(0.0..1.0).contains(&d) || d == 0.0) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "duty is the running fraction, between 0 and 1".into(),
+        ));
+    }
+    let boot = s
+        .measurements
+        .lock()
+        .expect("measurements lock")
+        .boot_id
+        .clone()
+        .or_else(crate::sample::boot_id)
+        .unwrap_or_default();
+    let awake = crate::timing::awake().as_nanos() as i64;
+    s.store().set_controls(&id, &c, awake, &boot, &s.instance)?;
     s.notify();
     ok()
 }
