@@ -90,7 +90,11 @@ paths:
 
   /v1/jobs/{id}/executor:
     post:
-      summary: Executor registers itself (process id and start time)
+      summary: Register the job's executor (process id and start time)
+      description: |
+        The submitting CLI registers the executor right after starting it, and
+        the executor registers itself again; repeating the same process is
+        accepted. A different process, or a job that has ended, gets 409.
       parameters:
         - { $ref: '#/components/parameters/Id' }
       requestBody:
@@ -102,22 +106,35 @@ paths:
               required: [pid, start]
               properties:
                 pid: { type: integer }
-                start: { type: string }
+                start: { type: string, description: Process start time as reported by the OS }
       responses:
         '204': { description: Recorded }
         '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
 
   /v1/jobs/{id}/lease:
     post:
       summary: Executor asks for the lease
       description: |
-        The lease is committed before the answer. Admission control is not in
-        place yet, so a queued job is admitted at once.
+        The lease is committed before the answer, and asking again after a
+        lost answer gets the same lease. `granted: false` means ask again
+        later; after a restart nothing is granted until running executors
+        have reconnected or a grace period has passed. Admission control is
+        not in place yet, so otherwise a queued job is admitted at once.
       parameters:
         - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pid]
+              properties:
+                pid: { type: integer, description: The registered executor }
       responses:
         '200':
-          description: Granted
+          description: Granted, or not yet
           content:
             application/json:
               schema:
@@ -126,7 +143,7 @@ paths:
                   granted: { type: boolean }
         '404': { $ref: '#/components/responses/Error' }
         '409':
-          description: The job is not queued (already admitted, or canceled)
+          description: The job ended before it started (for example, canceled), or the caller is not its executor
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorBody' }
@@ -145,6 +162,7 @@ paths:
               required: [log_path]
               properties:
                 log_path: { type: string, description: Directory holding stdout.log and stderr.log }
+                pgid: { type: integer, description: Process group of the command }
       responses:
         '204': { description: Recorded }
         '404': { $ref: '#/components/responses/Error' }
@@ -170,6 +188,7 @@ paths:
   /v1/jobs/{id}/finished:
     post:
       summary: The job reached a terminal state
+      description: Repeating the same terminal state is accepted; a different one gets 409.
       parameters:
         - { $ref: '#/components/parameters/Id' }
       requestBody:
@@ -186,10 +205,12 @@ paths:
         '204': { description: Recorded }
         '400': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
 
   /v1/jobs/{id}/control:
     get:
       summary: What the executor should do now
+      description: Executors poll this; a poll also counts as reconnecting after a daemon restart.
       parameters:
         - { $ref: '#/components/parameters/Id' }
       responses:
@@ -317,6 +338,8 @@ components:
         request_id: { type: string }
         sandbox_signature: { type: string }
         service: { type: boolean, default: false }
+        launcher_pid: { type: integer, description: The submitting CLI, which starts the executor }
+        launcher_start: { type: string, description: Start time of the submitting CLI }
       additionalProperties: true
 
     Created:
@@ -340,6 +363,7 @@ components:
         exit_code: { type: [integer, 'null'] }
         main_exit_code: { type: [integer, 'null'] }
         log_path: { type: [string, 'null'] }
+        executor_pid: { type: [integer, 'null'] }
         submissions: { type: integer }
         created_at: { type: string, format: date-time }
         started_at: { type: [string, 'null'], format: date-time }

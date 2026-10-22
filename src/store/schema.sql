@@ -20,7 +20,10 @@ CREATE TABLE jobs (
     cpu_seconds         REAL,
     log_path            TEXT,
     executor_pid        INTEGER,
-    executor_start      TEXT,
+    executor_start      TEXT,               -- process start time; with the pid it identifies the executor
+    pgid                INTEGER,            -- process group of the command
+    launcher_pid        INTEGER,            -- the CLI that starts the executor
+    launcher_start      TEXT,
     merge_fingerprint   TEXT,               -- set while running, cleared at the terminal state
     created_at          TEXT NOT NULL,
     started_at          TEXT,

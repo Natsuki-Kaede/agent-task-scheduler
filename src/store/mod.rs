@@ -36,6 +36,8 @@ pub struct NewSubmission {
     pub service: bool,
     /// Options as JSON, kept for status and recovery.
     pub options: serde_json::Value,
+    /// The process that will start the executor, as (pid, start time).
+    pub launcher: Option<(i64, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -75,6 +77,7 @@ pub struct JobRow {
     pub exit_code: Option<i64>,
     pub main_exit_code: Option<i64>,
     pub log_path: Option<String>,
+    pub executor_pid: Option<i64>,
     pub submissions: i64,
     pub created_at: String,
     pub started_at: Option<String>,
@@ -97,10 +100,45 @@ pub struct SubmissionRow {
     pub final_retrieved: bool,
 }
 
+/// A job that has not ended, as the recovery check sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveJob {
+    pub id: String,
+    pub state: String,
+    /// The executor process, as (pid, start time).
+    pub executor: Option<(i64, String)>,
+    pub pgid: Option<i64>,
+    /// The process that starts the executor, as (pid, start time).
+    pub launcher: Option<(i64, String)>,
+    pub main_exit_code: Option<i64>,
+}
+
+fn process(pid: Option<i64>, start: Option<String>) -> Option<(i64, String)> {
+    pid.zip(start)
+}
+
 /// A request id that is already bound to a different command.
 #[derive(Debug, thiserror::Error)]
 #[error("request id {0} is already used by a different command")]
 pub struct RequestIdConflict(pub String);
+
+/// The named job or submission does not exist.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct NotFound(pub String);
+
+/// The request does not fit the job's current state.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Conflict(pub String);
+
+fn no_job(job: &str) -> anyhow::Error {
+    NotFound(format!("no job {job}")).into()
+}
+
+fn no_submission(id: &str) -> anyhow::Error {
+    NotFound(format!("no submission {id}")).into()
+}
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -160,9 +198,20 @@ impl Store {
         let submission = crate::ids::new("s");
         let at = now();
         tx.execute(
-            "INSERT INTO jobs (id, node_id, state, cwd, project_root, entry, command, service, created_at)
-             VALUES (?1, 'local', 'queued', ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![job, new.cwd, new.project_root, new.entry.as_str(), new.command, new.service, at],
+            "INSERT INTO jobs (id, node_id, state, cwd, project_root, entry, command, service,
+                               launcher_pid, launcher_start, created_at)
+             VALUES (?1, 'local', 'queued', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                job,
+                new.cwd,
+                new.project_root,
+                new.entry.as_str(),
+                new.command,
+                new.service,
+                new.launcher.as_ref().map(|l| l.0),
+                new.launcher.as_ref().map(|l| &l.1),
+                at
+            ],
         )?;
         tx.execute(
             "INSERT INTO submissions (id, job_id, session_id, agent, invocation_key, request_id,
@@ -197,7 +246,7 @@ impl Store {
     pub fn list_jobs(&self, states: &[String], limit: u32) -> Result<Vec<JobRow>> {
         let mut sql = String::from(
             "SELECT j.id, j.state, j.entry, j.command, j.cwd, j.project_root, j.service, j.exit_code,
-                    j.main_exit_code, j.log_path,
+                    j.main_exit_code, j.log_path, j.executor_pid,
                     (SELECT COUNT(*) FROM submissions s WHERE s.job_id = j.id),
                     j.created_at, j.started_at, j.ended_at
              FROM jobs j",
@@ -223,10 +272,11 @@ impl Store {
                 exit_code: r.get(7)?,
                 main_exit_code: r.get(8)?,
                 log_path: r.get(9)?,
-                submissions: r.get(10)?,
-                created_at: r.get(11)?,
-                started_at: r.get(12)?,
-                ended_at: r.get(13)?,
+                executor_pid: r.get(10)?,
+                submissions: r.get(11)?,
+                created_at: r.get(12)?,
+                started_at: r.get(13)?,
+                ended_at: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -272,7 +322,7 @@ impl Store {
     fn list_jobs_where(&self, cond: &str, values: &[&dyn rusqlite::ToSql]) -> Result<Vec<JobRow>> {
         let sql = format!(
             "SELECT j.id, j.state, j.entry, j.command, j.cwd, j.project_root, j.service, j.exit_code,
-                    j.main_exit_code, j.log_path,
+                    j.main_exit_code, j.log_path, j.executor_pid,
                     (SELECT COUNT(*) FROM submissions s WHERE s.job_id = j.id),
                     j.created_at, j.started_at, j.ended_at
              FROM jobs j WHERE {cond}"
@@ -290,10 +340,11 @@ impl Store {
                 exit_code: r.get(7)?,
                 main_exit_code: r.get(8)?,
                 log_path: r.get(9)?,
-                submissions: r.get(10)?,
-                created_at: r.get(11)?,
-                started_at: r.get(12)?,
-                ended_at: r.get(13)?,
+                executor_pid: r.get(10)?,
+                submissions: r.get(11)?,
+                created_at: r.get(12)?,
+                started_at: r.get(13)?,
+                ended_at: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -312,8 +363,8 @@ impl Store {
         Ok(())
     }
 
-    /// Updates a job and records an event in one transaction. Fails when the
-    /// job does not exist.
+    /// Updates a job that is not in a terminal state and records an event,
+    /// in one transaction.
     fn update_job(
         &mut self,
         job: &str,
@@ -323,22 +374,49 @@ impl Store {
         detail: Option<&str>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
+        let state = Self::state_in(&tx, job)?;
+        if is_terminal(&state) {
+            return Err(Conflict(format!("job {job} has already ended ({state})")).into());
+        }
         let mut all: Vec<&dyn rusqlite::ToSql> = values.to_vec();
         all.push(&job);
-        let n = tx.execute(
+        tx.execute(
             &format!("UPDATE jobs SET {set} WHERE id = ?{}", all.len()),
             all.as_slice(),
         )?;
-        if n == 0 {
-            bail!("no job {job}");
-        }
         Self::event(&tx, job, event, detail)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Records the executor that owns a job.
+    fn state_in(tx: &rusqlite::Transaction, job: &str) -> Result<String> {
+        tx.query_row("SELECT state FROM jobs WHERE id = ?1", params![job], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .ok_or_else(|| no_job(job))
+    }
+
+    /// Records the executor that owns a job. The submitting CLI registers it
+    /// right after starting it and the executor registers itself again;
+    /// both name the same process. Another process is refused, so a job
+    /// never gets two executors.
     pub fn set_executor(&mut self, job: &str, pid: i64, start: &str) -> Result<()> {
+        let current: Option<(Option<i64>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT executor_pid, executor_start FROM jobs WHERE id = ?1",
+                params![job],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match current.ok_or_else(|| no_job(job))? {
+            (Some(p), Some(s)) if p == pid && s == start => return Ok(()),
+            (Some(p), _) => {
+                return Err(Conflict(format!("job {job} already has executor {p}")).into());
+            }
+            _ => {}
+        }
         self.update_job(
             job,
             "executor_pid = ?1, executor_start = ?2",
@@ -349,17 +427,25 @@ impl Store {
     }
 
     /// Persists a lease and moves the job to admitted (design 7.3: the
-    /// lease is committed before the executor is told).
-    pub fn grant_lease(&mut self, job: &str) -> Result<()> {
+    /// lease is committed before the executor is told). Asking again after
+    /// a lost answer gets the same lease.
+    pub fn grant_lease(&mut self, job: &str, pid: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
-        let state: String = tx
-            .query_row("SELECT state FROM jobs WHERE id = ?1", params![job], |r| {
-                r.get(0)
-            })
+        let (state, executor): (String, Option<i64>) = tx
+            .query_row(
+                "SELECT state, executor_pid FROM jobs WHERE id = ?1",
+                params![job],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()?
-            .ok_or_else(|| anyhow::anyhow!("no job {job}"))?;
-        if state != "queued" {
-            bail!("job {job} is {state}, not queued");
+            .ok_or_else(|| no_job(job))?;
+        if executor != Some(pid) {
+            return Err(Conflict(format!("process {pid} is not the executor of job {job}")).into());
+        }
+        match state.as_str() {
+            "queued" => {}
+            "admitted" => return Ok(()),
+            _ => return Err(Conflict(format!("job {job} is {state}, not queued")).into()),
         }
         tx.execute(
             "INSERT INTO leases (job_id, granted_at) VALUES (?1, ?2)",
@@ -374,12 +460,16 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_started(&mut self, job: &str, log_path: &str) -> Result<()> {
+    /// Records that the command started in process group `pgid`.
+    pub fn set_started(&mut self, job: &str, log_path: &str, pgid: Option<i64>) -> Result<()> {
+        if self.job(job)?.is_some_and(|j| j.state == "running") {
+            return Ok(());
+        }
         let at = now();
         self.update_job(
             job,
-            "state = 'running', started_at = ?1, log_path = ?2",
-            &[&at, &log_path],
+            "state = 'running', started_at = ?1, log_path = ?2, pgid = ?3",
+            &[&at, &log_path, &pgid],
             "started",
             None,
         )
@@ -397,10 +487,14 @@ impl Store {
         )
     }
 
-    /// Moves a job to a terminal state.
+    /// Moves a job to a terminal state. Repeating the same terminal state
+    /// is accepted; a different one is a conflict.
     pub fn finish(&mut self, job: &str, state: &str, exit_code: Option<i64>) -> Result<()> {
         if !is_terminal(state) {
             bail!("{state} is not a terminal state");
+        }
+        if self.job(job)?.is_some_and(|j| j.state == state) {
+            return Ok(());
         }
         let at = now();
         self.update_job(
@@ -412,6 +506,40 @@ impl Store {
         )
     }
 
+    /// Marks a job whose executor is gone while its processes still run
+    /// (design 7.3 ⑦). It keeps its lease until they exit.
+    pub fn await_takeover(&mut self, job: &str) -> Result<()> {
+        self.update_job(
+            job,
+            "state = 'awaiting_takeover'",
+            &[],
+            "executor_lost",
+            None,
+        )
+    }
+
+    /// Jobs that have not reached a terminal state, with what recovery needs.
+    pub fn active_jobs(&self) -> Result<Vec<ActiveJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, state, executor_pid, executor_start, pgid, launcher_pid, launcher_start,
+                    main_exit_code
+             FROM jobs WHERE state NOT IN (
+                 'completed', 'start_failed', 'canceled', 'replaced',
+                 'externally_terminated', 'ended_unknown')",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ActiveJob {
+                id: r.get(0)?,
+                state: r.get(1)?,
+                executor: process(r.get(2)?, r.get(3)?),
+                pgid: r.get(4)?,
+                launcher: process(r.get(5)?, r.get(6)?),
+                main_exit_code: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     fn update_submission(&mut self, id: &str, set: &str) -> Result<String> {
         let tx = self.conn.transaction()?;
         let job: String = tx
@@ -421,7 +549,7 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?
-            .ok_or_else(|| anyhow::anyhow!("no submission {id}"))?;
+            .ok_or_else(|| no_submission(id))?;
         tx.execute(
             &format!("UPDATE submissions SET {set} WHERE id = ?1"),
             params![id],
@@ -447,15 +575,13 @@ impl Store {
 
     /// Records that the submission's terminal state reached its caller.
     pub fn mark_retrieved(&mut self, id: &str) -> Result<String> {
-        let row = self
-            .submission(id)?
-            .ok_or_else(|| anyhow::anyhow!("no submission {id}"))?;
+        let row = self.submission(id)?.ok_or_else(|| no_submission(id))?;
         if !is_terminal(&row.job_state) {
-            bail!(
+            return Err(Conflict(format!(
                 "job {} is {}, not in a terminal state",
-                row.job,
-                row.job_state
-            );
+                row.job, row.job_state
+            ))
+            .into());
         }
         self.update_submission(id, "final_retrieved = 1")
     }
@@ -518,6 +644,7 @@ mod tests {
             sandbox_signature: None,
             service: false,
             options: serde_json::json!({}),
+            launcher: None,
         }
     }
 

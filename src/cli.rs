@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::client::{self, Answer};
 use crate::executor;
 use crate::paths::Paths;
+use crate::procinfo;
 use crate::runspec::RunSpec;
 use crate::store::is_terminal;
 use crate::timing::Deadline;
@@ -27,6 +28,7 @@ const TAIL_LINES: usize = 50;
 /// Longest single wait request, so a request-file answer stays bounded.
 const WAIT_CHUNK: Duration = Duration::from_secs(30);
 const FOLLOW_POLL: Duration = Duration::from_millis(500);
+const RECONNECT_PAUSE: Duration = Duration::from_millis(500);
 
 /// Identity and correlation fields an adapter's hook adds (design 6.7).
 pub struct Identity {
@@ -67,21 +69,34 @@ async fn wait_for(
     wait: Option<Duration>,
 ) -> Result<(bool, Value)> {
     let deadline = Deadline::after(wait);
+    let mut last: Option<Value> = None;
     loop {
         let chunk = deadline.remaining().unwrap_or(WAIT_CHUNK).min(WAIT_CHUNK);
-        let (answer, _) = client::call_with_timeout(
+        let called = client::call_with_timeout(
             paths,
             "POST",
             &format!("/v1/submissions/{submission}/wait"),
             Some(json!({ "wait_seconds": chunk.as_secs_f64(), "until": until })),
             chunk + Duration::from_secs(10),
         )
-        .await?;
+        .await;
+        let answer = match (called, &last) {
+            (Ok((answer, _)), _) => answer,
+            // Once the daemon has answered, an unreachable daemon is
+            // restarting; keep waiting within the time limit.
+            (Err(_), Some(last)) if deadline.expired() => return Ok((false, last.clone())),
+            (Err(_), Some(_)) => {
+                tokio::time::sleep(RECONNECT_PAUSE).await;
+                continue;
+            }
+            (Err(e), None) => return Err(e),
+        };
         let body = expect_ok(answer)?;
         let reached = body["reached"] == true;
         if reached || deadline.expired() {
             return Ok((reached, body["submission"].clone()));
         }
+        last = Some(body["submission"].clone());
     }
 }
 
@@ -153,6 +168,8 @@ pub async fn run(
         "agent": id.tool,
         "invocation_key": id.call,
         "request_id": id.request_id,
+        "launcher_pid": std::process::id(),
+        "launcher_start": procinfo::start_time(std::process::id() as i32),
     });
     match &spec {
         RunSpec::Argv { argv } => {
@@ -178,16 +195,32 @@ pub async fn run(
 
     // A repeated request id returns the earlier submission; its job already
     // has an executor (design 6.7 ⑥).
-    if created["existing"] != true
-        && let Err(e) = executor::spawn_detached(job, &spec, &cwd)
-    {
-        post(
-            paths,
-            &format!("/v1/jobs/{job}/finished"),
-            json!({ "state": "start_failed", "exit_code": null }),
-        )
-        .await?;
-        return Err(e);
+    if created["existing"] != true {
+        match executor::spawn_detached(job, &spec, &cwd) {
+            // Register the executor before this process can exit, so the
+            // job always has a known starter (the executor registers too).
+            Ok(pid) => {
+                if let Some(start) = procinfo::start_time(pid) {
+                    let body = json!({ "pid": pid, "start": start });
+                    client::call(
+                        paths,
+                        "POST",
+                        &format!("/v1/jobs/{job}/executor"),
+                        Some(body),
+                    )
+                    .await?;
+                }
+            }
+            Err(e) => {
+                post(
+                    paths,
+                    &format!("/v1/jobs/{job}/finished"),
+                    json!({ "state": "start_failed", "exit_code": null }),
+                )
+                .await?;
+                return Err(e);
+            }
+        }
     }
 
     let (reached, sub) = wait_for(paths, submission, "main", wait).await?;

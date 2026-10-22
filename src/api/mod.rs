@@ -1,7 +1,10 @@
 //! The daemon's HTTP/JSON API (api/openapi.yaml). The same router serves the
 //! unix socket and the request-file channel.
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -14,7 +17,8 @@ use serde_json::json;
 mod lifecycle;
 
 use crate::redact;
-use crate::store::{Entry, NewSubmission, RequestIdConflict, Store};
+use crate::store::{Conflict, Entry, NewSubmission, NotFound, RequestIdConflict, Store};
+use crate::timing::Deadline;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +28,10 @@ pub struct AppState {
     /// Bumped after every change to jobs or submissions, so that waiting
     /// requests re-check their condition.
     pub changes: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Executors expected to reconnect after a restart, and until when
+    /// leases wait for them (design 7.3 ⑥).
+    reconnect: Arc<Mutex<(HashSet<String>, Deadline)>>,
+    stopping: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -33,7 +41,36 @@ impl AppState {
             started_at,
             instance,
             changes: Arc::new(tokio::sync::watch::channel(0).0),
+            reconnect: Arc::new(Mutex::new((HashSet::new(), Deadline::after(None)))),
+            stopping: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Holds leases until each of these jobs' executors has contacted the
+    /// daemon, or until `grace` has passed.
+    pub fn expect_reconnects(&self, jobs: HashSet<String>, grace: Duration) {
+        *self.reconnect.lock().expect("reconnect lock") = (jobs, Deadline::after(Some(grace)));
+    }
+
+    /// Records that a job's executor reached the daemon.
+    pub fn contact(&self, job: &str) {
+        self.reconnect.lock().expect("reconnect lock").0.remove(job);
+    }
+
+    /// False while executors are still reconnecting after a restart.
+    pub fn admitting(&self) -> bool {
+        let r = self.reconnect.lock().expect("reconnect lock");
+        r.0.is_empty() || r.1.expired()
+    }
+
+    /// Ends held requests so the daemon can stop.
+    pub fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.notify();
+    }
+
+    pub fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
 
     /// Wakes requests waiting for a change.
@@ -66,8 +103,12 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        if e.downcast_ref::<RequestIdConflict>().is_some() {
+        if e.downcast_ref::<RequestIdConflict>().is_some() || e.downcast_ref::<Conflict>().is_some()
+        {
             return ApiError(StatusCode::CONFLICT, e.to_string());
+        }
+        if e.downcast_ref::<NotFound>().is_some() {
+            return ApiError(StatusCode::NOT_FOUND, e.to_string());
         }
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
     }
@@ -104,6 +145,9 @@ pub struct SubmitRequest {
     pub sandbox_signature: Option<String>,
     #[serde(default)]
     pub service: bool,
+    /// The submitting CLI, which starts the executor.
+    pub launcher_pid: Option<i64>,
+    pub launcher_start: Option<String>,
     #[serde(flatten)]
     pub options: serde_json::Map<String, serde_json::Value>,
 }
@@ -144,6 +188,7 @@ async fn submit(State(s): State<AppState>, Json(req): Json<SubmitRequest>) -> Ap
         sandbox_signature: req.sandbox_signature,
         service: req.service,
         options: serde_json::Value::Object(options),
+        launcher: req.launcher_pid.zip(req.launcher_start),
     };
     let created = s.store().create_submission(&new)?;
     s.notify();

@@ -2,13 +2,20 @@
 //! through the request-file channel.
 
 mod lock;
+mod supervisor;
 
 use anyhow::{Context, Result};
 use std::future::Future;
+use std::time::Duration;
 
 use crate::api::{self, AppState};
 use crate::paths::Paths;
 use crate::store::{self, Store};
+
+/// How long leases wait after a restart for running executors to reconnect.
+/// They poll every half second, so this covers slow starts.
+const RECONNECT_GRACE: Duration = Duration::from_secs(10);
+const SWEEP_EVERY: Duration = Duration::from_secs(1);
 
 /// Runs the daemon until `shutdown` completes.
 pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
@@ -18,7 +25,14 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
 
     let store = Store::open(&paths.db)?;
     let state = AppState::new(store, store::now(), crate::ids::new("d"));
-    let router = api::router(state);
+    let procs = supervisor::System;
+    let reconnecting = supervisor::live_executors(&state, &procs)?;
+    tracing::info!(
+        count = reconnecting.len(),
+        "waiting for running executors to reconnect"
+    );
+    state.expect_reconnects(reconnecting.into_iter().collect(), RECONNECT_GRACE);
+    let router = api::router(state.clone());
 
     // Holding the lock means no other daemon owns the socket file, so a
     // leftover one is stale.
@@ -31,11 +45,27 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
         paths.requests.clone(),
         router.clone(),
     ));
+    let watcher = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = supervisor::sweep(&state, &procs) {
+                    tracing::error!("checking executors: {e:#}");
+                }
+                tokio::time::sleep(SWEEP_EVERY).await;
+            }
+        })
+    };
     tracing::info!(socket = %paths.socket.display(), requests = %paths.requests.display(), "ats daemon started");
 
+    let stopping = state.clone();
     let served = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            stopping.stop();
+        })
         .await;
+    watcher.abort();
     channel.abort();
     let _ = std::fs::remove_file(&paths.socket);
     tracing::info!("ats daemon stopped");

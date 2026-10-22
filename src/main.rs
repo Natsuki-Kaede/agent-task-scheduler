@@ -9,6 +9,7 @@ mod daemon;
 mod executor;
 mod ids;
 mod paths;
+mod procinfo;
 mod redact;
 mod runspec;
 mod store;

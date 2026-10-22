@@ -35,14 +35,6 @@ fn ok() -> ApiResult<Response> {
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-fn not_found(e: anyhow::Error) -> ApiError {
-    if e.to_string().starts_with("no ") {
-        ApiError(StatusCode::NOT_FOUND, e.to_string())
-    } else {
-        e.into()
-    }
-}
-
 async fn job(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
     match s.store().job(&id)? {
         Some(row) => Ok(Json(row).into_response()),
@@ -61,22 +53,31 @@ async fn executor(
     Path(id): Path<String>,
     Json(b): Json<ExecutorBody>,
 ) -> ApiResult<Response> {
-    s.store()
-        .set_executor(&id, b.pid, &b.start)
-        .map_err(not_found)?;
+    s.store().set_executor(&id, b.pid, &b.start)?;
     s.notify();
     ok()
 }
 
-/// Grants the lease. Admission control (design 10) decides when; until it
-/// lands, every job is admitted at once.
-async fn lease(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    s.store()
-        .grant_lease(&id)
-        .map_err(|e| match e.to_string() {
-            m if m.starts_with("no ") => ApiError(StatusCode::NOT_FOUND, m),
-            m => ApiError(StatusCode::CONFLICT, m),
-        })?;
+#[derive(Deserialize)]
+struct LeaseBody {
+    pid: i64,
+}
+
+/// Grants the lease, or answers `granted: false` and the executor asks
+/// again. Nothing is admitted while executors are reconnecting after a
+/// restart (design 7.3 ⑥). Admission control (design 10) decides the rest;
+/// until it lands, every job is admitted at once.
+async fn lease(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<LeaseBody>,
+) -> ApiResult<Response> {
+    s.contact(&id);
+    let admitted = s.store().job(&id)?.is_some_and(|j| j.state == "admitted");
+    if !admitted && !s.admitting() {
+        return Ok(Json(json!({ "granted": false })).into_response());
+    }
+    s.store().grant_lease(&id, b.pid)?;
     s.notify();
     Ok(Json(json!({ "granted": true })).into_response())
 }
@@ -84,6 +85,7 @@ async fn lease(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<R
 #[derive(Deserialize)]
 struct StartedBody {
     log_path: String,
+    pgid: Option<i64>,
 }
 
 async fn started(
@@ -91,7 +93,7 @@ async fn started(
     Path(id): Path<String>,
     Json(b): Json<StartedBody>,
 ) -> ApiResult<Response> {
-    s.store().set_started(&id, &b.log_path).map_err(not_found)?;
+    s.store().set_started(&id, &b.log_path, b.pgid)?;
     s.notify();
     ok()
 }
@@ -106,9 +108,7 @@ async fn main_result(
     Path(id): Path<String>,
     Json(b): Json<ExitBody>,
 ) -> ApiResult<Response> {
-    s.store()
-        .set_main_result(&id, b.exit_code)
-        .map_err(not_found)?;
+    s.store().set_main_result(&id, b.exit_code)?;
     s.notify();
     ok()
 }
@@ -130,14 +130,15 @@ async fn finished(
             format!("{} is not a terminal state", b.state),
         ));
     }
-    s.store()
-        .finish(&id, &b.state, b.exit_code)
-        .map_err(not_found)?;
+    s.store().finish(&id, &b.state, b.exit_code)?;
     s.notify();
     ok()
 }
 
+/// Polled by executors; also tells the daemon that the executor is
+/// connected.
 async fn control(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    s.contact(&id);
     let cancel = s.store().cancel_requested(&id)?;
     Ok(Json(json!({ "cancel": cancel })).into_response())
 }
@@ -176,7 +177,7 @@ async fn wait(
             .submission(&id)?
             .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no submission {id}")))?;
         let done = reached(&row, &b.until);
-        if done || deadline.expired() {
+        if done || deadline.expired() || s.stopping() {
             return Ok(Json(json!({ "reached": done, "submission": row })).into_response());
         }
         // Re-check on every change, and at least once a second: tokio's
@@ -190,24 +191,19 @@ async fn wait(
 }
 
 async fn cancel(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    s.store().cancel_submission(&id).map_err(not_found)?;
+    s.store().cancel_submission(&id)?;
     s.notify();
     ok()
 }
 
 async fn detach(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    s.store().detach_submission(&id).map_err(not_found)?;
+    s.store().detach_submission(&id)?;
     s.notify();
     ok()
 }
 
 async fn retrieved(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    s.store()
-        .mark_retrieved(&id)
-        .map_err(|e| match e.to_string() {
-            m if m.starts_with("no ") => ApiError(StatusCode::NOT_FOUND, m),
-            m => ApiError(StatusCode::CONFLICT, m),
-        })?;
+    s.store().mark_retrieved(&id)?;
     ok()
 }
 
@@ -264,18 +260,30 @@ mod tests {
             }
         };
 
-        let executor = json!({"pid": 1, "start": "t"});
+        // The CLI and the executor both register the same process; another
+        // process is refused.
+        for _ in 0..2 {
+            let executor = json!({"pid": 1, "start": "t"});
+            assert_eq!(
+                post(format!("/v1/jobs/{job}/executor"), executor).await,
+                StatusCode::NO_CONTENT
+            );
+        }
+        let other = json!({"pid": 2, "start": "t"});
         assert_eq!(
-            post(format!("/v1/jobs/{job}/executor"), executor).await,
-            StatusCode::NO_CONTENT
+            post(format!("/v1/jobs/{job}/executor"), other).await,
+            StatusCode::CONFLICT
         );
+        // Asking again after a lost answer gets the same lease; only the
+        // executor gets it.
+        for _ in 0..2 {
+            assert_eq!(
+                post(format!("/v1/jobs/{job}/lease"), json!({"pid": 1})).await,
+                StatusCode::OK
+            );
+        }
         assert_eq!(
-            post(format!("/v1/jobs/{job}/lease"), json!({})).await,
-            StatusCode::OK
-        );
-        // A lease is granted once.
-        assert_eq!(
-            post(format!("/v1/jobs/{job}/lease"), json!({})).await,
+            post(format!("/v1/jobs/{job}/lease"), json!({"pid": 2})).await,
             StatusCode::CONFLICT
         );
         assert_eq!(
@@ -313,6 +321,17 @@ mod tests {
             json!({"state": "completed", "exit_code": 2}),
         )
         .await;
+        // A repeated report is accepted; a different end is refused.
+        let again = json!({"state": "completed", "exit_code": 2});
+        assert_eq!(
+            post(format!("/v1/jobs/{job}/finished"), again).await,
+            StatusCode::NO_CONTENT
+        );
+        let other = json!({"state": "canceled"});
+        assert_eq!(
+            post(format!("/v1/jobs/{job}/finished"), other).await,
+            StatusCode::CONFLICT
+        );
         let w = wait("terminal").await;
         assert_eq!(w["reached"], true);
         assert_eq!(w["submission"]["exit_code"], 2);
@@ -345,10 +364,39 @@ mod tests {
             &app,
             "POST",
             &format!("/v1/jobs/{job}/lease"),
-            Some(json!({})),
+            Some(json!({"pid": 1})),
         )
         .await;
         assert_eq!(st, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn leases_wait_while_running_executors_reconnect() {
+        let state = crate::api::AppState::new(
+            crate::store::Store::open_in_memory().unwrap(),
+            "t".into(),
+            "i".into(),
+        );
+        let app = crate::api::router(state.clone());
+        let (_, job) = submit(&app).await;
+        let executor = json!({"pid": 1, "start": "t"});
+        call(
+            &app,
+            "POST",
+            &format!("/v1/jobs/{job}/executor"),
+            Some(executor),
+        )
+        .await;
+
+        state.expect_reconnects(
+            ["running-before".to_string()].into(),
+            std::time::Duration::from_secs(60),
+        );
+        let path = format!("/v1/jobs/{job}/lease");
+        let lease = || call(&app, "POST", &path, Some(json!({"pid": 1})));
+        assert_eq!(lease().await.1["granted"], false);
+        call(&app, "GET", "/v1/jobs/running-before/control", None).await;
+        assert_eq!(lease().await.1["granted"], true);
     }
 
     #[tokio::test]
