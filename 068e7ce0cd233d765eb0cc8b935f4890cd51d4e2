@@ -1,0 +1,21 @@
+src/daemon/pressure.rs
+  s_bb9527a6cd4695::t_0f4d8a8c6bd523 17-18,85-95,107,158-162
+src/store/mod.rs
+  s_bb9527a6cd4695::t_0f4d8a8c6bd523 15-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6059be9fe956fe7393b3ea5c2575e2e46389d68c",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
