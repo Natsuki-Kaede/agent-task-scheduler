@@ -1,0 +1,78 @@
+src/daemon/supervisor.rs
+  s_bb9527a6cd4695::t_1f93f1cae6e4bc 7-9,16,24-25,42-58,64-65,91-97,99-102,118-122,129,136-142,146-149,191,202,285-291,296
+  s_bb9527a6cd4695::t_c23ad1c4d2c07d 123-127,143-145,292-295,297-301
+  s_bb9527a6cd4695::t_a7a6ab04ad523b 302
+src/api/lifecycle.rs
+  s_bb9527a6cd4695::t_c23ad1c4d2c07d 142-143,509-512
+  s_bb9527a6cd4695::t_c15e76a476cd74 354
+  s_bb9527a6cd4695::t_125957a2ad2a94 35,131-133,141,495-508,513-523,526
+  s_bb9527a6cd4695::t_be95969753d690 101-108,196-199
+  s_bb9527a6cd4695::t_c14d05df1ac2c3 524-525
+src/daemon/mod.rs
+  s_bb9527a6cd4695::t_17b90ac394735e 20,129
+  s_bb9527a6cd4695::t_125957a2ad2a94 4,90-93,107
+  s_bb9527a6cd4695::t_c23ad1c4d2c07d 73,75
+src/store/history.rs
+  s_bb9527a6cd4695::t_c15e76a476cd74 85
+  s_bb9527a6cd4695::t_125957a2ad2a94 86
+src/main.rs
+  s_bb9527a6cd4695::t_f59de6d47a7903 9
+src/store/schema.sql
+  s_bb9527a6cd4695::t_8e37a61ae16f1c 23-25
+src/api/mod.rs
+  s_bb9527a6cd4695::t_ee57bfc378ad7e 231-233
+profiles/builtin.toml
+  s_bb9527a6cd4695::t_be95969753d690 227
+api/openapi.yaml
+  s_bb9527a6cd4695::t_3f7ec066d5e8f0 142-151,180,242,353-384,454,486-492
+  s_bb9527a6cd4695::t_2e26060761e8f4 493
+src/executor/jobserver.rs
+  s_bb9527a6cd4695::t_7ec28978cffd0f 72-80,96-100,102
+  s_bb9527a6cd4695::t_3b08c028276790 1-30,33-36,39-51,57-63,68-71,81-89,91-94,101,103-104,109,115-124
+  s_bb9527a6cd4695::t_ed6ffe8621cc09 90,95,105-108,110-114,163-165,167,169-172
+  s_bb9527a6cd4695::t_18a15d14bd30b1 125-162,166,168,173-174
+  s_bb9527a6cd4695::t_c23ad1c4d2c07d 31-32,37-38,52-56,64-67
+src/daemon/controller.rs
+  s_bb9527a6cd4695::t_2c4bb745941d9f 1-83,90-93,100-130,135-139,144-174
+  s_bb9527a6cd4695::t_c23ad1c4d2c07d 84-89,94-99,131-134,140-143
+src/control.rs
+  s_bb9527a6cd4695::t_48d0feda181d24 1-5,45-52,60-89,94-98,103-105,111-121,126-144
+  s_bb9527a6cd4695::t_c23ad1c4d2c07d 53-59,90-93,99-102,106-110,122-125
+  s_bb9527a6cd4695::t_8e37a61ae16f1c 6-44
+src/daemon/scheduler.rs
+  s_bb9527a6cd4695::t_be95969753d690 220-222
+src/executor/mod.rs
+  s_bb9527a6cd4695::t_c23ad1c4d2c07d 144-149,156-158,161-165,323,325
+  s_bb9527a6cd4695::t_ed6ffe8621cc09 181-182
+  s_bb9527a6cd4695::t_39bc3a1fc78634 5,10-11,60-63,74,88,91,134,136,140-143,150-155,159-160,166-180,183-199,231,247,279,318-320,326-328,331-334,340-341
+src/store/mod.rs
+  s_bb9527a6cd4695::t_125957a2ad2a94 517-519,536
+  s_bb9527a6cd4695::t_ee57bfc378ad7e 18
+  s_bb9527a6cd4695::t_8e37a61ae16f1c 14,65-68,257,259,279-280
+  s_bb9527a6cd4695::t_c23ad1c4d2c07d 520-526
+  s_bb9527a6cd4695::t_1f93f1cae6e4bc 145-146,724-725,738
+src/store/control.rs
+  s_bb9527a6cd4695::t_8e37a61ae16f1c 1-34,38-43,49-55,61-70,79-93,102-109,113-115,120,128-129,134-139,145-153
+  s_bb9527a6cd4695::t_c23ad1c4d2c07d 35-37,44-48,56-60,71-78,94-101,110-112,116-119,121-127,130-133,140-144
+src/store/sched.rs
+  s_bb9527a6cd4695::t_8e37a61ae16f1c 186,200,202-204
+src/api/plan.rs
+  s_bb9527a6cd4695::t_ee57bfc378ad7e 10-11,96-102,118-119,127-153,158-159,166-178,208-218,233-237
+  s_bb9527a6cd4695::t_c23ad1c4d2c07d 154-157,160-165,219-232
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "63456ce261de531cf5ee20d4aa505cb9e223088d",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
