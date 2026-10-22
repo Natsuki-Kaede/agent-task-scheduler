@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use super::{ApiError, ApiResult, AppState, SubmitRequest, bad_request};
 use crate::recognize::Recognizer;
 use crate::sched::locks;
-use crate::sched::predict::{Defaults, Hint, predict};
+use crate::sched::predict::{Defaults, Hint, Lookup, Stats, line_key, predict};
 use crate::store::{Entry, Plan, Store};
 
 /// Memory and cores of this machine, for default predictions.
@@ -32,7 +32,8 @@ fn machine(s: &AppState) -> (u64, f64) {
     }
 }
 
-pub fn plan(s: &AppState, store: &Store, req: &SubmitRequest) -> ApiResult<Plan> {
+/// `command` is the stored (redacted) form, which history is matched on.
+pub fn plan(s: &AppState, store: &Store, req: &SubmitRequest, command: &str) -> ApiResult<Plan> {
     let cwd = Path::new(&req.cwd);
     let recognizer = Recognizer::new(&s.profiles, &s.wrappers);
     let analysis = match req.entry {
@@ -44,11 +45,24 @@ pub fn plan(s: &AppState, store: &Store, req: &SubmitRequest) -> ApiResult<Plan>
         None => Hint::default(),
     };
     let (mem, cores) = machine(s);
+    let project = locks::project_root(cwd).to_string_lossy().into_owned();
+    let history = |lookup: Lookup| {
+        let found = match lookup {
+            Lookup::Line => store.history(Some(&project), Some(command), None),
+            Lookup::ProjectKey(key) => store.history(Some(&project), None, Some(key)),
+            Lookup::GlobalKey(key) => store.history(None, None, Some(key)),
+        };
+        found.unwrap_or_else(|e| {
+            tracing::warn!("reading history: {e:#}");
+            Stats::default()
+        })
+    };
     let prediction = predict(
         &analysis,
         &s.profiles,
         &Defaults::for_machine(mem, cores),
         &hint,
+        &history,
     );
     let locks = locks::for_line(&analysis, cwd, &s.profiles, &req.lock);
 
@@ -92,6 +106,7 @@ pub fn plan(s: &AppState, store: &Store, req: &SubmitRequest) -> ApiResult<Plan>
         after,
         run_now: req.now,
         urgency,
+        history_key: line_key(&analysis),
     };
     if req.now {
         refuse_now_conflicts(store, &plan)?;

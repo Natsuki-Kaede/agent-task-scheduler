@@ -19,6 +19,7 @@ CREATE TABLE jobs (
     run_now             INTEGER NOT NULL DEFAULT 0, -- submitted with --now
     urgency             INTEGER NOT NULL DEFAULT 0, -- -1 low, 0 normal, 1 high
     pinned              INTEGER,                    -- manual queue position
+    history_key         TEXT,                       -- tool and subcommand of a one-command line
     reserved_private    INTEGER NOT NULL DEFAULT 0,
     exit_code           INTEGER,
     main_exit_code      INTEGER,            -- main execution process result, an observation only
@@ -36,6 +37,8 @@ CREATE TABLE jobs (
     ended_at            TEXT
 );
 CREATE INDEX jobs_state ON jobs(state);
+CREATE INDEX jobs_line ON jobs(project_root, command);
+CREATE INDEX jobs_history_key ON jobs(history_key);
 
 CREATE TABLE submissions (
     id                  TEXT PRIMARY KEY,

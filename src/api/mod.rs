@@ -266,7 +266,7 @@ async fn submit(State(s): State<AppState>, Json(req): Json<SubmitRequest>) -> Ap
     let plan = if repeated {
         Default::default()
     } else {
-        plan::plan(&s, &store, &req)?
+        plan::plan(&s, &store, &req, &command)?
     };
     let new = NewSubmission {
         entry: req.entry,

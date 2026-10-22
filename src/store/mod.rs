@@ -11,6 +11,7 @@ use serde::Serialize;
 use crate::sched::locks::Lock;
 use crate::sched::predict::Prediction;
 
+mod history;
 mod sched;
 
 pub use sched::PRE_LEASE;
@@ -58,6 +59,8 @@ pub struct Plan {
     pub after: Vec<String>,
     pub run_now: bool,
     pub urgency: i8,
+    /// Tool and subcommand of a one-command line, for history lookups.
+    pub history_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -243,8 +246,10 @@ impl Store {
         tx.execute(
             "INSERT INTO jobs (id, node_id, state, cwd, project_root, entry, command, service,
                                launcher_pid, launcher_start, created_at, profile, predicted_private,
-                               predicted_extra, predicted_cores, freezable, run_now, urgency)
-             VALUES (?1, 'local', 'queued', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                               predicted_extra, predicted_cores, freezable, run_now, urgency,
+                               predicted_seconds, history_key)
+             VALUES (?1, 'local', 'queued', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                     ?17, ?18)",
             params![
                 job,
                 new.cwd,
@@ -262,6 +267,8 @@ impl Store {
                 new.plan.prediction.freezable,
                 new.plan.run_now,
                 new.plan.urgency,
+                new.plan.prediction.seconds,
+                new.plan.history_key,
             ],
         )?;
         tx.execute(
