@@ -2,6 +2,7 @@
 //! through the request-file channel.
 
 mod lock;
+mod scheduler;
 mod supervisor;
 
 use anyhow::{Context, Result};
@@ -42,7 +43,9 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
         );
     }
     let profiles = Profiles::load(Some(&paths.profiles))?;
-    let state = AppState::new(store, store::now(), instance);
+    let config = crate::config::Config::load(&paths)?;
+    let state = AppState::new(store, store::now(), instance)
+        .with_recognition(profiles, config.recognize.wrappers);
     let procs = supervisor::System;
     let reconnecting = supervisor::live_executors(&state, &procs)?;
     tracing::info!(
@@ -76,8 +79,12 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
     };
     let sampling = {
         let state = state.clone();
-        std::thread::spawn(move || sample_loop(&state, Sampler::new(&profiles)))
+        std::thread::spawn(move || {
+            let sampler = Sampler::new(&state.profiles);
+            sample_loop(&state, sampler)
+        })
     };
+    let scheduling = tokio::spawn(scheduler::run(state.clone()));
     tracing::info!(socket = %paths.socket.display(), requests = %paths.requests.display(), "ats daemon started");
 
     let stopping = state.clone();
@@ -88,6 +95,7 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
         })
         .await;
     watcher.abort();
+    scheduling.abort();
     channel.abort();
     let _ = sampling.join();
     let _ = std::fs::remove_file(&paths.socket);

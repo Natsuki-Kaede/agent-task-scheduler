@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{ApiError, ApiResult, AppState};
-use crate::store::{SubmissionRow, is_terminal};
+use crate::store::{PRE_LEASE, SubmissionRow, is_terminal};
 use crate::timing::Deadline;
 
 pub fn routes() -> Router<AppState> {
@@ -29,6 +29,9 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/submissions/{id}/detach", post(detach))
         .route("/v1/submissions/{id}/retrieved", post(retrieved))
         .route("/v1/requests/{id}", get(by_request))
+        .route("/v1/jobs/{id}/why", get(why))
+        .route("/v1/jobs/{id}/unblock", post(unblock))
+        .route("/v1/jobs/{id}/pin", post(pin))
 }
 
 fn ok() -> ApiResult<Response> {
@@ -63,23 +66,54 @@ struct LeaseBody {
     pid: i64,
 }
 
-/// Grants the lease, or answers `granted: false` and the executor asks
-/// again. Nothing is admitted while executors are reconnecting after a
-/// restart (design 7.3 ⑥). Admission control (design 10) decides the rest;
-/// until it lands, every job is admitted at once.
+/// How long a lease request waits for the scheduler before answering
+/// `granted: false`; it stays under the request-file channel's timeout.
+const LEASE_POLL: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(3)
+};
+
+/// Answers whether the scheduler has admitted the job (design 10). The
+/// lease is already committed when it is granted; the request waits a
+/// little for a decision so commands do not lose a polling interval.
 async fn lease(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Json(b): Json<LeaseBody>,
 ) -> ApiResult<Response> {
     s.contact(&id);
-    let admitted = s.store().job(&id)?.is_some_and(|j| j.state == "admitted");
-    if !admitted && !s.admitting() {
-        return Ok(Json(json!({ "granted": false })).into_response());
+    let deadline = Deadline::after(Some(LEASE_POLL));
+    let mut changes = s.changes.subscribe();
+    loop {
+        let row = s
+            .store()
+            .job(&id)?
+            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no job {id}")))?;
+        if row.executor_pid != Some(b.pid) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!("process {} is not the executor of job {id}", b.pid),
+            ));
+        }
+        if row.state == "admitted" {
+            return Ok(Json(json!({ "granted": true })).into_response());
+        }
+        if !PRE_LEASE.contains(&row.state.as_str()) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!("job {id} is {}", row.state),
+            ));
+        }
+        if deadline.expired() || s.stopping() {
+            return Ok(Json(json!({ "granted": false })).into_response());
+        }
+        let pause = deadline
+            .remaining()
+            .unwrap_or_default()
+            .min(Duration::from_secs(1));
+        let _ = tokio::time::timeout(pause, changes.changed()).await;
     }
-    s.store().grant_lease(&id, b.pid)?;
-    s.notify();
-    Ok(Json(json!({ "granted": true })).into_response())
 }
 
 #[derive(Deserialize)]
@@ -159,8 +193,13 @@ struct WaitBody {
     until: String,
 }
 
+/// A blocked job waits for `ats unblock` or a cancel, and one too big for
+/// the machine for a decision; both are reported instead of waited out.
 fn reached(row: &SubmissionRow, until: &str) -> bool {
-    is_terminal(&row.job_state) || (until == "main" && row.main_exit_code.is_some())
+    is_terminal(&row.job_state)
+        || row.job_state == "blocked"
+        || (until == "main"
+            && (row.main_exit_code.is_some() || row.job_state == "capacity_insufficient"))
 }
 
 /// Waits for a submission's job to reach a condition, up to a time limit,
@@ -178,6 +217,12 @@ async fn wait(
     }
     let deadline = Deadline::after(b.wait_seconds.map(Duration::from_secs_f64));
     let mut changes = s.changes.subscribe();
+    let job = s
+        .store()
+        .submission(&id)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no submission {id}")))?
+        .job;
+    let _awaiting = s.awaiting(&job);
     loop {
         let row = s
             .store()
@@ -247,7 +292,12 @@ mod tests {
 
     #[tokio::test]
     async fn job_runs_to_terminal_and_result_is_retrieved() {
-        let app = app();
+        let state = crate::api::AppState::new(
+            crate::store::Store::open_in_memory().unwrap(),
+            "t".into(),
+            "i".into(),
+        );
+        let app = crate::api::router(state.clone());
         let (sub, job) = submit(&app).await;
         let post = |path: String, body| {
             let app = app.clone();
@@ -281,13 +331,16 @@ mod tests {
             post(format!("/v1/jobs/{job}/executor"), other).await,
             StatusCode::CONFLICT
         );
+        // The lease comes from the scheduler; until it decides, the answer
+        // is "not yet".
+        let lease_path = format!("/v1/jobs/{job}/lease");
+        let lease = |pid: i64| call(&app, "POST", &lease_path, Some(json!({"pid": pid})));
+        assert_eq!(lease(1).await.1["granted"], false);
+        state.store().admit(&job, 1 << 30, 0).unwrap();
         // Asking again after a lost answer gets the same lease; only the
         // executor gets it.
         for _ in 0..2 {
-            assert_eq!(
-                post(format!("/v1/jobs/{job}/lease"), json!({"pid": 1})).await,
-                StatusCode::OK
-            );
+            assert_eq!(lease(1).await.1["granted"], true);
         }
         assert_eq!(
             post(format!("/v1/jobs/{job}/lease"), json!({"pid": 2})).await,
@@ -378,35 +431,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leases_wait_while_running_executors_reconnect() {
-        let state = crate::api::AppState::new(
-            crate::store::Store::open_in_memory().unwrap(),
-            "t".into(),
-            "i".into(),
-        );
-        let app = crate::api::router(state.clone());
-        let (_, job) = submit(&app).await;
-        let executor = json!({"pid": 1, "start": "t"});
-        call(
-            &app,
-            "POST",
-            &format!("/v1/jobs/{job}/executor"),
-            Some(executor),
-        )
-        .await;
-
-        state.expect_reconnects(
-            ["running-before".to_string()].into(),
-            std::time::Duration::from_secs(60),
-        );
-        let path = format!("/v1/jobs/{job}/lease");
-        let lease = || call(&app, "POST", &path, Some(json!({"pid": 1})));
-        assert_eq!(lease().await.1["granted"], false);
-        call(&app, "GET", "/v1/jobs/running-before/control", None).await;
-        assert_eq!(lease().await.1["granted"], true);
-    }
-
-    #[tokio::test]
     async fn finds_submissions_by_request_id() {
         let app = app();
         let body = json!({"entry": "argv", "argv": ["make"], "cwd": "/w", "request_id": "r1"});
@@ -419,4 +443,37 @@ mod tests {
             StatusCode::NOT_FOUND
         );
     }
+}
+
+/// Why a job is where it is: its state, and for a waiting job the
+/// scheduler's latest verdict (design 5.4).
+async fn why(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    let row = s
+        .store()
+        .job(&id)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no job {id}")))?;
+    let verdict = s.verdicts.lock().expect("verdicts lock").get(&id).cloned();
+    Ok(Json(json!({ "job": id, "state": row.state, "verdict": verdict })).into_response())
+}
+
+async fn unblock(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    s.store().unblock(&id)?;
+    s.notify();
+    ok()
+}
+
+#[derive(Deserialize)]
+struct PinBody {
+    /// Queue position; lower runs first. `null` unpins.
+    rank: Option<i64>,
+}
+
+async fn pin(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<PinBody>,
+) -> ApiResult<Response> {
+    s.store().pin(&id, b.rank)?;
+    s.notify();
+    ok()
 }

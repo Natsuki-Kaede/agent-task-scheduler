@@ -1,7 +1,7 @@
 //! The daemon's HTTP/JSON API (api/openapi.yaml). The same router serves the
 //! unix socket and the request-file channel.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,9 +15,12 @@ use serde::Deserialize;
 use serde_json::json;
 
 mod lifecycle;
+mod plan;
 
+use crate::profile::Profiles;
 use crate::redact;
 use crate::sample::Snapshot;
+use crate::sched::Verdict;
 use crate::store::{Conflict, Entry, NewSubmission, NotFound, RequestIdConflict, Store};
 use crate::timing::Deadline;
 
@@ -35,6 +38,31 @@ pub struct AppState {
     stopping: Arc<AtomicBool>,
     /// The latest resource measurements (design 9).
     pub measurements: Arc<Mutex<Snapshot>>,
+    pub profiles: Arc<Profiles>,
+    /// Wrapper programs from the configuration (design 8.1).
+    pub wrappers: Arc<Vec<String>>,
+    /// Jobs someone is waiting for, with how many waits (design 10.3).
+    awaited: Arc<Mutex<HashMap<String, usize>>>,
+    /// The scheduler's latest verdict on each waiting job, for `ats why`.
+    pub verdicts: Arc<Mutex<HashMap<String, Verdict>>>,
+}
+
+/// Counts a wait on a job while it lasts.
+pub struct Awaiting {
+    awaited: Arc<Mutex<HashMap<String, usize>>>,
+    job: String,
+}
+
+impl Drop for Awaiting {
+    fn drop(&mut self) {
+        let mut map = self.awaited.lock().expect("awaited lock");
+        if let Some(n) = map.get_mut(&self.job) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.job);
+            }
+        }
+    }
 }
 
 impl AppState {
@@ -47,7 +75,41 @@ impl AppState {
             reconnect: Arc::new(Mutex::new((HashSet::new(), Deadline::after(None)))),
             stopping: Arc::new(AtomicBool::new(false)),
             measurements: Arc::new(Mutex::new(Snapshot::default())),
+            profiles: Arc::new(Profiles::load(None).expect("built-in profiles parse")),
+            wrappers: Arc::new(Vec::new()),
+            awaited: Arc::new(Mutex::new(HashMap::new())),
+            verdicts: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Uses the user's profiles and wrapper list instead of the built-in
+    /// profiles alone.
+    pub fn with_recognition(mut self, profiles: Profiles, wrappers: Vec<String>) -> Self {
+        self.profiles = Arc::new(profiles);
+        self.wrappers = Arc::new(wrappers);
+        self
+    }
+
+    pub fn awaiting(&self, job: &str) -> Awaiting {
+        *self
+            .awaited
+            .lock()
+            .expect("awaited lock")
+            .entry(job.to_string())
+            .or_default() += 1;
+        Awaiting {
+            awaited: self.awaited.clone(),
+            job: job.to_string(),
+        }
+    }
+
+    pub fn awaited_jobs(&self) -> HashSet<String> {
+        self.awaited
+            .lock()
+            .expect("awaited lock")
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Holds leases until each of these jobs' executors has contacted the
@@ -153,6 +215,19 @@ pub struct SubmitRequest {
     /// The submitting CLI, which starts the executor.
     pub launcher_pid: Option<i64>,
     pub launcher_start: Option<String>,
+    /// `--after`: job or submission ids that must succeed first.
+    #[serde(default)]
+    pub after: Vec<String>,
+    /// `--now`: run at once unless a dependency or lock conflicts.
+    #[serde(default)]
+    pub now: bool,
+    /// `--lock`: extra paths or named resources.
+    #[serde(default)]
+    pub lock: Vec<String>,
+    /// `--hint mem=6G,cpu=4`.
+    pub hint: Option<String>,
+    /// `--urgency low|normal|high`.
+    pub urgency: Option<String>,
     #[serde(flatten)]
     pub options: serde_json::Map<String, serde_json::Value>,
 }
@@ -181,10 +256,24 @@ async fn submit(State(s): State<AppState>, Json(req): Json<SubmitRequest>) -> Ap
     if let Some(shell) = &req.shell {
         options.insert("shell".into(), json!(shell));
     }
+    let mut store = s.store();
+    // A repeated request id returns the earlier submission without planning
+    // again; its job may hold the very locks `--now` would check.
+    let repeated = match &req.request_id {
+        Some(rid) => store.submission_by_request(rid)?.is_some(),
+        None => false,
+    };
+    let plan = if repeated {
+        Default::default()
+    } else {
+        plan::plan(&s, &store, &req)?
+    };
     let new = NewSubmission {
         entry: req.entry,
         command,
-        project_root: req.cwd.clone(),
+        project_root: crate::sched::locks::project_root(std::path::Path::new(&req.cwd))
+            .to_string_lossy()
+            .into_owned(),
         cwd: req.cwd,
         session_id: req.session,
         agent: req.agent,
@@ -194,8 +283,10 @@ async fn submit(State(s): State<AppState>, Json(req): Json<SubmitRequest>) -> Ap
         service: req.service,
         options: serde_json::Value::Object(options),
         launcher: req.launcher_pid.zip(req.launcher_start),
+        plan,
     };
-    let created = s.store().create_submission(&new)?;
+    let created = store.create_submission(&new)?;
+    drop(store);
     s.notify();
     let status = if created.existing {
         StatusCode::OK

@@ -33,6 +33,8 @@ pub enum Node {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Segment {
     pub argv: Vec<String>,
+    /// The directory it runs in, following static `cd`s earlier in the line.
+    pub cwd: PathBuf,
     /// Program basename and first positional word, for history lookups
     /// (design 8.3).
     pub tool: Option<String>,
@@ -385,6 +387,7 @@ impl Run<'_, '_> {
             // Only assignments or redirections.
             (true, _) => Segment {
                 argv,
+                cwd: self.cwd.clone(),
                 tool: None,
                 subcommand: None,
                 profile: None,
@@ -400,6 +403,7 @@ impl Run<'_, '_> {
                     .first()
                     .map(|s| s.to_string());
                 Segment {
+                    cwd: self.cwd.clone(),
                     tool: Some(basename(&argv[0])),
                     subcommand,
                     profile: p.map(|p| p.name.clone()),

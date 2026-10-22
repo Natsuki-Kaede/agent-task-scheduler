@@ -40,9 +40,13 @@ paths:
     post:
       summary: Register a submission with a new job
       description: |
-        The submission is committed before the daemon answers. Repeating a
-        request_id with the same command returns the earlier submission (200);
-        with a different command it is rejected (409).
+        The daemon recognizes the command, predicts its resources, derives
+        its locks and records its predecessors, all committed with the
+        submission before it answers. Repeating a request_id with the same
+        command returns the earlier submission (200); with a different
+        command it is rejected (409). `now` is refused (409) when a
+        predecessor has not succeeded or a lock is held; the error names
+        each conflict. A bad hint, urgency or predecessor gets 400.
       requestBody:
         required: true
         content:
@@ -114,13 +118,14 @@ paths:
 
   /v1/jobs/{id}/lease:
     post:
-      summary: Executor asks for the lease
+      summary: Executor asks whether the job is admitted
       description: |
-        The lease is committed before the answer, and asking again after a
-        lost answer gets the same lease. `granted: false` means ask again
-        later; after a restart nothing is granted until running executors
-        have reconnected or a grace period has passed. Admission control is
-        not in place yet, so otherwise a queued job is admitted at once.
+        The scheduler admits jobs and commits their lease and reservation
+        before this answers `granted: true`; asking again after a lost
+        answer gets the same answer. The request waits up to 3 seconds for
+        a decision, then answers `granted: false`, and the executor asks
+        again. A job that ended before it started (for example, canceled)
+        gets 409.
       parameters:
         - { $ref: '#/components/parameters/Id' }
       requestBody:
@@ -290,6 +295,50 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorBody' }
 
+  /v1/jobs/{id}/why:
+    get:
+      summary: Why a job is where it is
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: The job's state and, while it waits, the scheduler's latest verdict
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: { type: string }
+                  state: { $ref: '#/components/schemas/JobState' }
+                  verdict: { oneOf: [{ $ref: '#/components/schemas/Verdict' }, { type: 'null' }] }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/jobs/{id}/unblock:
+    post:
+      summary: Run a job whose predecessor failed
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '204': { description: Queued again }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/jobs/{id}/pin:
+    post:
+      summary: Set or clear a job's manual queue position
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rank: { type: [integer, 'null'], description: Lower runs first; null unpins }
+      responses:
+        '204': { description: Recorded }
+        '404': { $ref: '#/components/responses/Error' }
+
   /v1/measurements:
     get:
       summary: The latest resource measurements
@@ -353,6 +402,12 @@ components:
         service: { type: boolean, default: false }
         launcher_pid: { type: integer, description: The submitting CLI, which starts the executor }
         launcher_start: { type: string, description: Start time of the submitting CLI }
+        after: { type: array, items: { type: string }, description: Job or submission ids that must succeed first }
+        now: { type: boolean, default: false, description: Skip the queue unless a dependency or lock conflicts }
+        lock: { type: array, items: { type: string }, description: Extra paths or named resources to lock }
+        hint: { type: string, description: 'Expected use such as mem=6G,cpu=4; used where higher than predicted' }
+        urgency: { type: string, enum: [low, normal, high] }
+        reason: { type: string }
       additionalProperties: true
 
     Created:
@@ -383,6 +438,24 @@ components:
         created_at: { type: string, format: date-time }
         started_at: { type: [string, 'null'], format: date-time }
         ended_at: { type: [string, 'null'], format: date-time }
+
+    Verdict:
+      type: object
+      description: |
+        verdict is admit, wait (with a reason), blocked (with the failed
+        predecessor `job`) or capacity_insufficient (with `need` and
+        `budget` in bytes). Wait reasons: recovering, pressure (level),
+        interval, no_executor, dependency (job), lock (resource, holder),
+        memory (need, free), cpu (need, free), behind (head).
+      properties:
+        verdict: { type: string, enum: [admit, wait, blocked, capacity_insufficient] }
+        reason:
+          type: object
+          properties:
+            kind: { type: string }
+        job: { type: string }
+        need: { type: integer }
+        budget: { type: integer }
 
     Usage:
       type: object

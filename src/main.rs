@@ -16,6 +16,7 @@ mod recognize;
 mod redact;
 mod runspec;
 mod sample;
+mod sched;
 mod store;
 mod timing;
 
@@ -46,6 +47,8 @@ struct IdentityArgs {
     call: Option<String>,
 }
 
+// Parsed once per process, so the size of `Run` does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// Run the daemon in the foreground.
@@ -54,7 +57,8 @@ enum Command {
     ///
     /// Returns the command's own output and exit code when its main process
     /// finishes within the wait; otherwise prints one status line and exits
-    /// with 75 while the job continues. 77: rejected; 78: ats error.
+    /// with 75 while the job continues. 76: a predecessor failed;
+    /// 77: rejected; 78: ats error.
     Run {
         /// Shell source, run by the submitter's shell.
         #[arg(long, conflicts_with = "argv")]
@@ -67,6 +71,8 @@ enum Command {
         no_wait: bool,
         #[command(flatten)]
         identity: IdentityArgs,
+        #[command(flatten)]
+        options: cli::RunOptions,
         /// The program and its arguments, run without a shell.
         #[arg(last = true, required_unless_present = "sh")]
         argv: Vec<String>,
@@ -99,6 +105,10 @@ enum Command {
         #[arg(short, long)]
         follow: bool,
     },
+    /// Explain why a job is still waiting.
+    Why { id: String },
+    /// Run a job whose predecessor failed.
+    Unblock { id: String },
     /// Cancel a submission; the job stops when no other submission wants it.
     Cancel { submission: String },
     /// Mark a submission as left to run in the background.
@@ -148,6 +158,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             wait,
             no_wait,
             identity,
+            options,
             argv,
         } => {
             let spec = match sh {
@@ -164,7 +175,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
                 call: identity.call,
                 request_id: identity.request_id,
             };
-            cli::run(&paths, spec, Some(wait), id).await
+            cli::run(&paths, spec, Some(wait), id, options).await
         }
         Command::Wait { submission, wait } => cli::wait(&paths, &submission, Some(wait)).await,
         Command::Status {
@@ -173,6 +184,8 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             cli::status_one(&paths, id.as_deref(), request.as_deref(), json).await
         }
         Command::Logs { id, follow } => cli::logs(&paths, &id, follow).await,
+        Command::Why { id } => cli::why(&paths, &id).await,
+        Command::Unblock { id } => cli::unblock(&paths, &id).await,
         Command::Cancel { submission } => cli::mark(&paths, &submission, "cancel").await,
         Command::Detach { submission } => cli::mark(&paths, &submission, "detach").await,
         Command::Status { state, json, .. } => {

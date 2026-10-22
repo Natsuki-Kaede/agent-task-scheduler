@@ -20,6 +20,8 @@ use crate::timing::Deadline;
 /// The command was not finished within the wait; it continues in the
 /// background.
 pub const EXIT_DETACHED: u8 = 75;
+/// The command cannot run because a predecessor failed.
+pub const EXIT_BLOCKED: u8 = 76;
 /// The submission was rejected.
 pub const EXIT_REJECTED: u8 = 77;
 
@@ -36,6 +38,38 @@ pub struct Identity {
     pub tool: Option<String>,
     pub call: Option<String>,
     pub request_id: Option<String>,
+}
+
+/// Scheduling options of `ats run` (design 5.3).
+#[derive(clap::Args, Debug, Default)]
+pub struct RunOptions {
+    /// Run only after these jobs or submissions succeed (comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub after: Vec<String>,
+    /// Run at once, skipping the queue. Only when explicitly asked to run
+    /// now; refused when a dependency or lock conflicts.
+    #[arg(long)]
+    pub now: bool,
+    /// Also lock this path or named resource, such as a device or port.
+    #[arg(long, value_delimiter = ',')]
+    pub lock: Vec<String>,
+    /// Expected use, such as mem=6G,cpu=4; used where higher than predicted.
+    #[arg(long)]
+    pub hint: Option<String>,
+    #[arg(long, value_parser = ["low", "normal", "high"])]
+    pub urgency: Option<String>,
+    /// Why the urgency is needed.
+    #[arg(long, requires = "urgency")]
+    pub reason: Option<String>,
+    /// Under memory pressure, slow it down but never freeze it.
+    #[arg(long)]
+    pub no_freeze: bool,
+    /// Do not share a run with an equal job already running.
+    #[arg(long)]
+    pub no_merge: bool,
+    /// A long-running service rather than a command that ends.
+    #[arg(long)]
+    pub service: bool,
 }
 
 fn expect_ok(answer: Answer) -> Result<Value> {
@@ -160,6 +194,7 @@ pub async fn run(
     spec: RunSpec,
     wait: Option<Duration>,
     id: Identity,
+    options: RunOptions,
 ) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
     let mut body = json!({
@@ -170,6 +205,15 @@ pub async fn run(
         "request_id": id.request_id,
         "launcher_pid": std::process::id(),
         "launcher_start": procinfo::start_time(std::process::id() as i32),
+        "after": options.after,
+        "now": options.now,
+        "lock": options.lock,
+        "hint": options.hint,
+        "urgency": options.urgency,
+        "reason": options.reason,
+        "no_freeze": options.no_freeze,
+        "no_merge": options.no_merge,
+        "service": options.service,
     });
     match &spec {
         RunSpec::Argv { argv } => {
@@ -224,6 +268,9 @@ pub async fn run(
     }
 
     let (reached, sub) = wait_for(paths, submission, "main", wait).await?;
+    if sub["job_state"] == "blocked" {
+        return blocked(paths, &sub).await;
+    }
     if reached {
         if let Some(code) = sub["main_exit_code"].as_i64() {
             print_output(&sub)?;
@@ -265,9 +312,25 @@ async fn report_terminal(paths: &Paths, sub: &Value) -> Result<ExitCode> {
     })
 }
 
+/// Reports a job held back by a failed predecessor (design 5.5: 76).
+async fn blocked(paths: &Paths, sub: &Value) -> Result<ExitCode> {
+    let job = sub["job"].as_str().unwrap_or_default();
+    let why = get(paths, &format!("/v1/jobs/{job}/why")).await?;
+    let predecessor = why["verdict"]["job"].as_str().unwrap_or("a predecessor");
+    eprintln!(
+        "[ats] submission {} job {job} did not run: {predecessor} failed. Run `ats unblock {job}` to run it anyway, or `ats cancel {}`.",
+        sub["id"].as_str().unwrap_or("?"),
+        sub["id"].as_str().unwrap_or("?"),
+    );
+    Ok(ExitCode::from(EXIT_BLOCKED))
+}
+
 /// `ats wait`: waits for the job's terminal state (design 5.4, 6.7 ⑧).
 pub async fn wait(paths: &Paths, submission: &str, wait: Option<Duration>) -> Result<ExitCode> {
     let (reached, sub) = wait_for(paths, submission, "terminal", wait).await?;
+    if sub["job_state"] == "blocked" {
+        return blocked(paths, &sub).await;
+    }
     if reached {
         return report_terminal(paths, &sub).await;
     }
@@ -378,5 +441,88 @@ pub async fn mark(paths: &Paths, submission: &str, action: &str) -> Result<ExitC
     .await?;
     let sub = get(paths, &format!("/v1/submissions/{submission}")).await?;
     eprintln!("{}", status_line(&sub));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A submission or job id to its job id.
+async fn job_of(paths: &Paths, id: &str) -> Result<String> {
+    if id.starts_with("j_") {
+        return Ok(id.to_string());
+    }
+    let sub = get(paths, &format!("/v1/submissions/{id}")).await?;
+    Ok(sub["job"].as_str().unwrap_or_default().to_string())
+}
+
+fn gib(bytes: f64) -> String {
+    format!("{:.1}G", bytes / (1u64 << 30) as f64)
+}
+
+/// One sentence for a scheduler verdict.
+fn explain(v: &Value) -> String {
+    let r = &v["reason"];
+    match (v["verdict"].as_str(), r["kind"].as_str()) {
+        (Some("admit"), _) => "it is being admitted now".into(),
+        (Some("blocked"), _) => format!(
+            "predecessor {} failed; `ats unblock` runs it anyway",
+            v["job"].as_str().unwrap_or("?")
+        ),
+        (Some("capacity_insufficient"), _) => format!(
+            "it is predicted to need {}, more than the memory budget of {}; cancel it, give a lower --hint, or run it with --now",
+            gib(v["need"].as_f64().unwrap_or(0.0)),
+            gib(v["budget"].as_f64().unwrap_or(0.0))
+        ),
+        (_, Some("recovering")) => {
+            "the daemon restarted and is waiting for running jobs to reconnect".into()
+        }
+        (_, Some("pressure")) => "memory pressure is rising, so nothing new is admitted".into(),
+        (_, Some("interval")) => {
+            "the last admitted job is still settling; admissions are spaced a few seconds apart"
+                .into()
+        }
+        (_, Some("no_executor")) => "its executor has not registered yet".into(),
+        (_, Some("dependency")) => format!(
+            "waiting for {} to succeed",
+            r["job"].as_str().unwrap_or("?")
+        ),
+        (_, Some("lock")) => format!(
+            "{} is locked by {}",
+            r["resource"].as_str().unwrap_or("?"),
+            r["holder"].as_str().unwrap_or("?")
+        ),
+        (_, Some("memory")) => format!(
+            "it needs {} of memory and {} is free",
+            gib(r["need"].as_f64().unwrap_or(0.0)),
+            gib(r["free"].as_f64().unwrap_or(0.0).max(0.0))
+        ),
+        (_, Some("cpu")) => format!(
+            "it needs {:.1} cores and {:.1} are free",
+            r["need"].as_f64().unwrap_or(0.0),
+            r["free"].as_f64().unwrap_or(0.0)
+        ),
+        (_, Some("behind")) => format!(
+            "{} is first in line and this would delay it",
+            r["head"].as_str().unwrap_or("?")
+        ),
+        _ => v.to_string(),
+    }
+}
+
+/// `ats why`: why a job is still waiting (design 5.4).
+pub async fn why(paths: &Paths, id: &str) -> Result<ExitCode> {
+    let job = job_of(paths, id).await?;
+    let w = get(paths, &format!("/v1/jobs/{job}/why")).await?;
+    let state = w["state"].as_str().unwrap_or("?");
+    match w.get("verdict").filter(|v| !v.is_null()) {
+        Some(v) => println!("job {job} is {state}: {}", explain(v)),
+        None => println!("job {job} is {state}"),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `ats unblock`: runs a job whose predecessor failed (design 5.4).
+pub async fn unblock(paths: &Paths, id: &str) -> Result<ExitCode> {
+    let job = job_of(paths, id).await?;
+    post(paths, &format!("/v1/jobs/{job}/unblock"), json!({})).await?;
+    println!("job {job} is queued again");
     Ok(ExitCode::SUCCESS)
 }

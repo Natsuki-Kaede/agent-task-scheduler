@@ -82,7 +82,8 @@ async fn acquire_lease(paths: &Paths, job: &str) -> Result<bool> {
         .await;
         match answer.status {
             200 if answer.body["granted"] == true => return Ok(true),
-            200 => tokio::time::sleep(RETRY).await,
+            // The daemon already held the request while it waited.
+            200 => {}
             409 => return Ok(false),
             s => bail!("asking for the lease: daemon answered {s}: {}", answer.body),
         }

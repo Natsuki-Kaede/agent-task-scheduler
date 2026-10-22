@@ -8,6 +8,13 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
+use crate::sched::locks::Lock;
+use crate::sched::predict::Prediction;
+
+mod sched;
+
+pub use sched::PRE_LEASE;
+
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_VERSION: i64 = 1;
 
@@ -38,6 +45,19 @@ pub struct NewSubmission {
     pub options: serde_json::Value,
     /// The process that will start the executor, as (pid, start time).
     pub launcher: Option<(i64, String)>,
+    pub plan: Plan,
+}
+
+/// What admission needs to know about a new job (design 5.2, 10).
+#[derive(Debug, Clone, Default)]
+pub struct Plan {
+    pub profiles: Vec<String>,
+    pub prediction: Prediction,
+    pub locks: Vec<Lock>,
+    /// Predecessor job ids from `--after`.
+    pub after: Vec<String>,
+    pub run_now: bool,
+    pub urgency: i8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -222,8 +242,9 @@ impl Store {
         let at = now();
         tx.execute(
             "INSERT INTO jobs (id, node_id, state, cwd, project_root, entry, command, service,
-                               launcher_pid, launcher_start, created_at)
-             VALUES (?1, 'local', 'queued', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                               launcher_pid, launcher_start, created_at, profile, predicted_private,
+                               predicted_extra, predicted_cores, freezable, run_now, urgency)
+             VALUES (?1, 'local', 'queued', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 job,
                 new.cwd,
@@ -233,7 +254,14 @@ impl Store {
                 new.service,
                 new.launcher.as_ref().map(|l| l.0),
                 new.launcher.as_ref().map(|l| &l.1),
-                at
+                at,
+                serde_json::to_string(&new.plan.profiles)?,
+                new.plan.prediction.private as i64,
+                new.plan.prediction.extra as i64,
+                new.plan.prediction.cores,
+                new.plan.prediction.freezable,
+                new.plan.run_now,
+                new.plan.urgency,
             ],
         )?;
         tx.execute(
@@ -252,6 +280,22 @@ impl Store {
                 at
             ],
         )?;
+        for lock in &new.plan.locks {
+            let (kind, resource) = match lock {
+                Lock::Path(p) => ("path", p),
+                Lock::Named(n) => ("named", n),
+            };
+            tx.execute(
+                "INSERT OR IGNORE INTO locks (job_id, resource, kind) VALUES (?1, ?2, ?3)",
+                params![job, resource, kind],
+            )?;
+        }
+        for after in &new.plan.after {
+            tx.execute(
+                "INSERT OR IGNORE INTO dependencies (job_id, after_job_id) VALUES (?1, ?2)",
+                params![job, after],
+            )?;
+        }
         tx.execute(
             "INSERT INTO job_events (job_id, at, kind) VALUES (?1, ?2, 'submitted')",
             params![job, at],
@@ -453,40 +497,6 @@ impl Store {
         )
     }
 
-    /// Persists a lease and moves the job to admitted (design 7.3: the
-    /// lease is committed before the executor is told). Asking again after
-    /// a lost answer gets the same lease.
-    pub fn grant_lease(&mut self, job: &str, pid: i64) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        let (state, executor): (String, Option<i64>) = tx
-            .query_row(
-                "SELECT state, executor_pid FROM jobs WHERE id = ?1",
-                params![job],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or_else(|| no_job(job))?;
-        if executor != Some(pid) {
-            return Err(Conflict(format!("process {pid} is not the executor of job {job}")).into());
-        }
-        match state.as_str() {
-            "queued" => {}
-            "admitted" => return Ok(()),
-            _ => return Err(Conflict(format!("job {job} is {state}, not queued")).into()),
-        }
-        tx.execute(
-            "INSERT INTO leases (job_id, granted_at) VALUES (?1, ?2)",
-            params![job, now()],
-        )?;
-        tx.execute(
-            "UPDATE jobs SET state = 'admitted' WHERE id = ?1",
-            params![job],
-        )?;
-        Self::event(&tx, job, "admitted", None)?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Records that the command started in process group `pgid`.
     pub fn set_started(&mut self, job: &str, log_path: &str, pgid: Option<i64>) -> Result<()> {
         if self.job(job)?.is_some_and(|j| j.state == "running") {
@@ -530,7 +540,12 @@ impl Store {
             &[&state, &exit_code, &at],
             state,
             exit_code.map(|c| c.to_string()).as_deref(),
-        )
+        )?;
+        self.conn.execute(
+            "DELETE FROM budget_records WHERE owner_kind = 'job' AND owner_id = ?1",
+            params![job],
+        )?;
+        Ok(())
     }
 
     /// Marks a job whose executor is gone while its processes still run
@@ -724,7 +739,11 @@ impl Store {
     /// its executor stops it.
     pub fn cancel_submission(&mut self, id: &str) -> Result<String> {
         let job = self.update_submission(id, "canceled = 1")?;
-        if self.cancel_requested(&job)? && self.job(&job)?.is_some_and(|j| j.state == "queued") {
+        if self.cancel_requested(&job)?
+            && self
+                .job(&job)?
+                .is_some_and(|j| PRE_LEASE.contains(&j.state.as_str()))
+        {
             self.finish(&job, "canceled", None)?;
         }
         Ok(job)
@@ -806,6 +825,7 @@ mod tests {
             service: false,
             options: serde_json::json!({}),
             launcher: None,
+            plan: Plan::default(),
         }
     }
 

@@ -38,7 +38,7 @@ use crate::procinfo::{self, CommandLine, Proc};
 use crate::profile::Profiles;
 use crate::timing;
 
-pub use os::boot_id;
+pub use os::{boot_id, system};
 
 /// Whole-machine readings (design 9.3). Counters are totals since boot.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]

@@ -12,7 +12,13 @@ CREATE TABLE jobs (
     profile             TEXT,
     service             INTEGER NOT NULL DEFAULT 0,
     predicted_private   INTEGER NOT NULL DEFAULT 0,
+    predicted_extra     INTEGER NOT NULL DEFAULT 0, -- memory outside the private range (design 10.1)
+    predicted_cores     REAL,
     predicted_seconds   REAL,
+    freezable           INTEGER NOT NULL DEFAULT 0,
+    run_now             INTEGER NOT NULL DEFAULT 0, -- submitted with --now
+    urgency             INTEGER NOT NULL DEFAULT 0, -- -1 low, 0 normal, 1 high
+    pinned              INTEGER,                    -- manual queue position
     reserved_private    INTEGER NOT NULL DEFAULT 0,
     exit_code           INTEGER,
     main_exit_code      INTEGER,            -- main execution process result, an observation only
