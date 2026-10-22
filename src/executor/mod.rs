@@ -190,7 +190,7 @@ pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Resu
         post(
             &paths,
             &format!("/v1/jobs/{job}/finished"),
-            json!({ "state": "canceled", "exit_code": null }),
+            ended("canceled", None),
         )
         .await?;
         return Ok(());
@@ -214,7 +214,7 @@ pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Resu
             () = tokio::time::sleep(GROUP_POLL) => {}
             () = wait_for_cancel(&paths, &job) => {
                 stop_group(pgid).await;
-                post(&paths, &format!("/v1/jobs/{job}/finished"), json!({ "state": "canceled", "exit_code": main })).await?;
+                post(&paths, &format!("/v1/jobs/{job}/finished"), ended("canceled", Some(main))).await?;
                 return Ok(());
             }
         }
@@ -222,10 +222,33 @@ pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Resu
     post(
         &paths,
         &format!("/v1/jobs/{job}/finished"),
-        json!({ "state": "completed", "exit_code": main }),
+        ended("completed", Some(main)),
     )
     .await?;
     Ok(())
+}
+
+/// The end report, with the usage of every process the command waited for:
+/// sampling misses commands shorter than its one-second interval
+/// (design 9.2).
+fn ended(state: &str, exit_code: Option<i64>) -> serde_json::Value {
+    // SAFETY: getrusage fills the struct.
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) };
+    let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+    // ru_maxrss is in bytes on macOS and kilobytes on Linux.
+    let max_rss = if cfg!(target_os = "macos") {
+        ru.ru_maxrss
+    } else {
+        ru.ru_maxrss * 1024
+    };
+    json!({
+        "state": state,
+        "exit_code": exit_code,
+        "cpu_seconds": secs(ru.ru_utime) + secs(ru.ru_stime),
+        "max_rss": max_rss,
+    })
 }
 
 async fn wait_for_cancel(paths: &Paths, job: &str) {

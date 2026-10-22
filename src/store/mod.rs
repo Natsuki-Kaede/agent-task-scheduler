@@ -78,6 +78,9 @@ pub struct JobRow {
     pub main_exit_code: Option<i64>,
     pub log_path: Option<String>,
     pub executor_pid: Option<i64>,
+    /// Peak private memory measured so far, in bytes.
+    pub peak_private: Option<i64>,
+    pub cpu_seconds: Option<f64>,
     pub submissions: i64,
     pub created_at: String,
     pub started_at: Option<String>,
@@ -115,6 +118,26 @@ pub struct ActiveJob {
 
 fn process(pid: Option<i64>, start: Option<String>) -> Option<(i64, String)> {
     pid.zip(start)
+}
+
+/// A 5-second summary of a job's measured usage (design 9.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobSample {
+    pub job: String,
+    pub private_resident: u64,
+    pub private_total: u64,
+    pub peak_private_total: u64,
+    pub cpu_seconds: f64,
+    pub disk_read: u64,
+    pub disk_write: u64,
+}
+
+/// A running total of awake time a job spends in a state (design 9.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntervalTotal {
+    pub awake_ns: i64,
+    /// Part of the time could not be counted, for example across a reboot.
+    pub uncertain: bool,
 }
 
 /// A request id that is already bound to a different command.
@@ -246,7 +269,7 @@ impl Store {
     pub fn list_jobs(&self, states: &[String], limit: u32) -> Result<Vec<JobRow>> {
         let mut sql = String::from(
             "SELECT j.id, j.state, j.entry, j.command, j.cwd, j.project_root, j.service, j.exit_code,
-                    j.main_exit_code, j.log_path, j.executor_pid,
+                    j.main_exit_code, j.log_path, j.executor_pid, j.peak_private, j.cpu_seconds,
                     (SELECT COUNT(*) FROM submissions s WHERE s.job_id = j.id),
                     j.created_at, j.started_at, j.ended_at
              FROM jobs j",
@@ -273,10 +296,12 @@ impl Store {
                 main_exit_code: r.get(8)?,
                 log_path: r.get(9)?,
                 executor_pid: r.get(10)?,
-                submissions: r.get(11)?,
-                created_at: r.get(12)?,
-                started_at: r.get(13)?,
-                ended_at: r.get(14)?,
+                peak_private: r.get(11)?,
+                cpu_seconds: r.get(12)?,
+                submissions: r.get(13)?,
+                created_at: r.get(14)?,
+                started_at: r.get(15)?,
+                ended_at: r.get(16)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -322,7 +347,7 @@ impl Store {
     fn list_jobs_where(&self, cond: &str, values: &[&dyn rusqlite::ToSql]) -> Result<Vec<JobRow>> {
         let sql = format!(
             "SELECT j.id, j.state, j.entry, j.command, j.cwd, j.project_root, j.service, j.exit_code,
-                    j.main_exit_code, j.log_path, j.executor_pid,
+                    j.main_exit_code, j.log_path, j.executor_pid, j.peak_private, j.cpu_seconds,
                     (SELECT COUNT(*) FROM submissions s WHERE s.job_id = j.id),
                     j.created_at, j.started_at, j.ended_at
              FROM jobs j WHERE {cond}"
@@ -341,10 +366,12 @@ impl Store {
                 main_exit_code: r.get(8)?,
                 log_path: r.get(9)?,
                 executor_pid: r.get(10)?,
-                submissions: r.get(11)?,
-                created_at: r.get(12)?,
-                started_at: r.get(13)?,
-                ended_at: r.get(14)?,
+                peak_private: r.get(11)?,
+                cpu_seconds: r.get(12)?,
+                submissions: r.get(13)?,
+                created_at: r.get(14)?,
+                started_at: r.get(15)?,
+                ended_at: r.get(16)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -518,6 +545,140 @@ impl Store {
         )
     }
 
+    /// Stores summaries and keeps each job's peak private memory and CPU
+    /// time, in one transaction.
+    pub fn record_samples(&mut self, samples: &[JobSample]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let at = now();
+        for s in samples {
+            tx.execute(
+                "INSERT INTO job_samples (job_id, at, private_resident, private_total, cpu_seconds, disk_read, disk_write)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![s.job, at, s.private_resident as i64, s.private_total as i64, s.cpu_seconds, s.disk_read as i64, s.disk_write as i64],
+            )?;
+            tx.execute(
+                "UPDATE jobs SET peak_private = MAX(COALESCE(peak_private, 0), ?2), cpu_seconds = MAX(COALESCE(cpu_seconds, 0), ?3)
+                 WHERE id = ?1",
+                params![s.job, s.peak_private_total as i64, s.cpu_seconds],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records the usage an executor reports at the end. CPU time is exact
+    /// for processes that were waited for. The largest resident size also
+    /// counts shared and file pages, so it only fills in for a job too short
+    /// to be sampled, as an upper bound.
+    pub fn record_exit_usage(
+        &mut self,
+        job: &str,
+        cpu_seconds: f64,
+        max_rss: Option<i64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET cpu_seconds = MAX(COALESCE(cpu_seconds, 0), ?2),
+                             peak_private = COALESCE(peak_private, ?3)
+             WHERE id = ?1",
+            params![job, cpu_seconds, max_rss],
+        )?;
+        Ok(())
+    }
+
+    /// Starts counting awake time in `kind` (frozen or throttled), if not
+    /// already counting. Readings are only comparable within one boot.
+    #[allow(dead_code)] // used by the freeze alert (T9)
+    pub fn open_interval(
+        &mut self,
+        job: &str,
+        kind: &str,
+        awake_ns: i64,
+        boot: &str,
+        instance: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO time_intervals (job_id, kind, open_since_awake_ns, open_state, boot_id, daemon_instance)
+             VALUES (?1, ?2, ?3, 'open', ?4, ?5)
+             ON CONFLICT (job_id, kind) DO UPDATE SET
+                 open_since_awake_ns = excluded.open_since_awake_ns, open_state = 'open',
+                 boot_id = excluded.boot_id, daemon_instance = excluded.daemon_instance
+             WHERE open_since_awake_ns IS NULL",
+            params![job, kind, awake_ns, boot, instance],
+        )?;
+        Ok(())
+    }
+
+    /// Stops counting and adds the open part to the settled total. A part
+    /// opened in another boot cannot be measured and marks the total as
+    /// uncertain instead of being dropped silently.
+    #[allow(dead_code)] // used by the freeze alert (T9)
+    pub fn close_interval(
+        &mut self,
+        job: &str,
+        kind: &str,
+        awake_ns: i64,
+        boot: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE time_intervals SET
+                 settled_awake_ns = settled_awake_ns
+                     + CASE WHEN boot_id = ?4 THEN MAX(0, ?3 - open_since_awake_ns) ELSE 0 END,
+                 uncertain = uncertain OR boot_id IS NOT ?4,
+                 open_since_awake_ns = NULL, open_state = NULL
+             WHERE job_id = ?1 AND kind = ?2 AND open_since_awake_ns IS NOT NULL",
+            params![job, kind, awake_ns, boot],
+        )?;
+        Ok(())
+    }
+
+    /// The settled total plus the open part, as of `awake_ns`.
+    #[allow(dead_code)] // used by the freeze alert (T9)
+    pub fn interval_total(
+        &self,
+        job: &str,
+        kind: &str,
+        awake_ns: i64,
+        boot: &str,
+    ) -> Result<Option<IntervalTotal>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT settled_awake_ns
+                        + CASE WHEN open_since_awake_ns IS NOT NULL AND boot_id = ?4
+                               THEN MAX(0, ?3 - open_since_awake_ns) ELSE 0 END,
+                        uncertain OR (open_since_awake_ns IS NOT NULL AND boot_id IS NOT ?4)
+                 FROM time_intervals WHERE job_id = ?1 AND kind = ?2",
+                params![job, kind, awake_ns, boot],
+                |r| {
+                    Ok(IntervalTotal {
+                        awake_ns: r.get(0)?,
+                        uncertain: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// At daemon start: open intervals from this boot keep counting under
+    /// the new daemon instance; those from an earlier boot are closed as
+    /// uncertain, since the clock they were read from restarted. Returns how
+    /// many were closed.
+    pub fn recover_intervals(&mut self, boot: &str, instance: &str) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE time_intervals SET daemon_instance = ?2
+             WHERE open_since_awake_ns IS NOT NULL AND boot_id = ?1",
+            params![boot, instance],
+        )?;
+        let closed = tx.execute(
+            "UPDATE time_intervals SET uncertain = 1, open_since_awake_ns = NULL, open_state = NULL
+             WHERE open_since_awake_ns IS NOT NULL AND boot_id IS NOT ?1",
+            params![boot],
+        )?;
+        tx.commit()?;
+        Ok(closed)
+    }
+
     /// Jobs that have not reached a terminal state, with what recovery needs.
     pub fn active_jobs(&self) -> Result<Vec<ActiveJob>> {
         let mut stmt = self.conn.prepare(
@@ -646,6 +807,86 @@ mod tests {
             options: serde_json::json!({}),
             launcher: None,
         }
+    }
+
+    #[test]
+    fn intervals_count_awake_time_and_flag_reboots() {
+        let mut store = Store::open_in_memory().unwrap();
+        let job = store.create_submission(&sample(None, "make")).unwrap().job;
+        let total = |s: &Store, now, boot| {
+            s.interval_total(&job, "frozen", now, boot)
+                .unwrap()
+                .unwrap()
+        };
+
+        store
+            .open_interval(&job, "frozen", 1_000, "b1", "d1")
+            .unwrap();
+        store
+            .open_interval(&job, "frozen", 1_500, "b1", "d1")
+            .unwrap(); // already open
+        assert_eq!(
+            total(&store, 3_000, "b1"),
+            IntervalTotal {
+                awake_ns: 2_000,
+                uncertain: false
+            }
+        );
+        store.close_interval(&job, "frozen", 4_000, "b1").unwrap();
+        assert_eq!(total(&store, 9_000, "b1").awake_ns, 3_000);
+
+        // A daemon restart in the same boot keeps counting.
+        store
+            .open_interval(&job, "frozen", 10_000, "b1", "d1")
+            .unwrap();
+        assert_eq!(store.recover_intervals("b1", "d2").unwrap(), 0);
+        store.close_interval(&job, "frozen", 11_000, "b1").unwrap();
+        assert_eq!(
+            total(&store, 0, "b1"),
+            IntervalTotal {
+                awake_ns: 4_000,
+                uncertain: false
+            }
+        );
+
+        // Across a reboot the open part is unknown: kept as uncertain.
+        store
+            .open_interval(&job, "frozen", 20_000, "b1", "d2")
+            .unwrap();
+        assert_eq!(
+            total(&store, 5, "b2"),
+            IntervalTotal {
+                awake_ns: 4_000,
+                uncertain: true
+            }
+        );
+        assert_eq!(store.recover_intervals("b2", "d3").unwrap(), 1);
+        assert_eq!(
+            total(&store, 5, "b2"),
+            IntervalTotal {
+                awake_ns: 4_000,
+                uncertain: true
+            }
+        );
+    }
+
+    #[test]
+    fn samples_keep_the_peak() {
+        let mut store = Store::open_in_memory().unwrap();
+        let job = store.create_submission(&sample(None, "make")).unwrap().job;
+        let s = |peak, cpu| JobSample {
+            job: job.clone(),
+            private_resident: 1,
+            private_total: 1,
+            peak_private_total: peak,
+            cpu_seconds: cpu,
+            disk_read: 0,
+            disk_write: 0,
+        };
+        store.record_samples(&[s(500, 1.0)]).unwrap();
+        store.record_samples(&[s(300, 2.5)]).unwrap();
+        let row = store.job(&job).unwrap().unwrap();
+        assert_eq!((row.peak_private, row.cpu_seconds), (Some(500), Some(2.5)));
     }
 
     #[test]

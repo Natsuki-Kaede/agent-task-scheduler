@@ -32,7 +32,6 @@ pub fn elapsed() -> Duration {
 }
 
 /// Time since boot, excluding sleep.
-#[allow(dead_code)] // used by the freeze alert (T9)
 pub fn awake() -> Duration {
     read(AWAKE_CLOCK)
 }

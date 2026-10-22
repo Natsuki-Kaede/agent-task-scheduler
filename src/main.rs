@@ -15,6 +15,7 @@ mod profile;
 mod recognize;
 mod redact;
 mod runspec;
+mod sample;
 mod store;
 mod timing;
 

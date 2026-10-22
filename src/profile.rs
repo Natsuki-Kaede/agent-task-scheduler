@@ -271,6 +271,10 @@ impl Profiles {
         Self::load(None).expect("built-in profiles parse")
     }
 
+    pub fn all(&self) -> &[Profile] {
+        &self.list
+    }
+
     /// The most specific profile for `argv`; on a tie, the one loaded later.
     pub fn find(&self, argv: &[String]) -> Option<&Profile> {
         self.list

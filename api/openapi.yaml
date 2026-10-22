@@ -201,6 +201,8 @@ paths:
               properties:
                 state: { $ref: '#/components/schemas/JobState' }
                 exit_code: { type: [integer, 'null'] }
+                cpu_seconds: { type: number, description: CPU time of every process the command waited for }
+                max_rss: { type: integer, description: Largest resident size of any one of them, in bytes; used only when sampling saw nothing }
       responses:
         '204': { description: Recorded }
         '400': { $ref: '#/components/responses/Error' }
@@ -288,6 +290,17 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorBody' }
 
+  /v1/measurements:
+    get:
+      summary: The latest resource measurements
+      description: System memory and pressure, and per-job and shared-daemon usage, sampled every second.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Measurements' }
+
   /v1/requests/{id}:
     get:
       summary: The submission registered under a caller's request id
@@ -364,10 +377,57 @@ components:
         main_exit_code: { type: [integer, 'null'] }
         log_path: { type: [string, 'null'] }
         executor_pid: { type: [integer, 'null'] }
+        peak_private: { type: [integer, 'null'], description: Peak private memory in bytes }
+        cpu_seconds: { type: [number, 'null'] }
         submissions: { type: integer }
         created_at: { type: string, format: date-time }
         started_at: { type: [string, 'null'], format: date-time }
         ended_at: { type: [string, 'null'], format: date-time }
+
+    Usage:
+      type: object
+      properties:
+        processes: { type: array, items: { type: integer } }
+        cpu_cores: { type: number, description: Cores kept busy over the last second }
+        cpu_seconds: { type: number }
+        private_resident: { type: integer, description: Private memory resident now, in bytes }
+        private_total: { type: integer, description: Private memory including compressed and swapped-out parts }
+        peak_private_total: { type: integer }
+        disk_read: { type: integer }
+        disk_write: { type: integer }
+
+    Measurements:
+      type: object
+      properties:
+        at: { type: string, format: date-time }
+        boot_id: { type: [string, 'null'] }
+        system:
+          type: [object, 'null']
+          properties:
+            mem_total: { type: integer }
+            mem_used: { type: integer }
+            compressed: { type: integer }
+            swap_used: { type: integer }
+            pressure: { type: integer, description: '1 normal, 2 warning, 4 critical' }
+            page_ins: { type: integer }
+            page_outs: { type: integer }
+            swap_ins: { type: integer }
+            swap_outs: { type: integer }
+            compressions: { type: integer }
+            decompressions: { type: integer }
+            perf_cores: { type: integer }
+            efficiency_cores: { type: integer }
+        rates:
+          type: object
+          description: Per-second rates of the system counters
+          additionalProperties: { type: number }
+        jobs: { type: object, additionalProperties: { $ref: '#/components/schemas/Usage' } }
+        shared: { type: object, additionalProperties: { $ref: '#/components/schemas/Usage' } }
+        last_sleep:
+          type: [object, 'null']
+          properties:
+            at: { type: string, format: date-time }
+            seconds: { type: number }
 
     Submission:
       type: object

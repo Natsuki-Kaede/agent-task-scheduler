@@ -117,6 +117,10 @@ async fn main_result(
 struct FinishedBody {
     state: String,
     exit_code: Option<i64>,
+    /// CPU time of every process the command waited for.
+    cpu_seconds: Option<f64>,
+    /// The largest resident size of any one of them.
+    max_rss: Option<i64>,
 }
 
 async fn finished(
@@ -129,6 +133,9 @@ async fn finished(
             StatusCode::BAD_REQUEST,
             format!("{} is not a terminal state", b.state),
         ));
+    }
+    if let Some(cpu) = b.cpu_seconds {
+        s.store().record_exit_usage(&id, cpu, b.max_rss)?;
     }
     s.store().finish(&id, &b.state, b.exit_code)?;
     s.notify();

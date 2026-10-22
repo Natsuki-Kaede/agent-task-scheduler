@@ -405,7 +405,6 @@ subcommand = ["build", "buildx build", "compose build"]
 class = "heavy"
 writes = "none"
 resources = { mem = "4G", cpu = 0, disk = true, network = true }
-daemons = [{ name = "docker daemon", shared = true }]
 
 [[profile]]
 name = "brew-install"
@@ -457,5 +456,5 @@ subcommand = ["run"]
 class = "heavy"
 writes = "none"
 resources = { mem = "512M", extra = "6G", gpu = "metal" }
-daemons = [{ name = "ollama", shared = true }]
+daemons = [{ name = "ollama serve", shared = true }]
 merge = { allowed = false }

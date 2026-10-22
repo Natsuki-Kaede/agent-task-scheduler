@@ -17,6 +17,7 @@ use serde_json::json;
 mod lifecycle;
 
 use crate::redact;
+use crate::sample::Snapshot;
 use crate::store::{Conflict, Entry, NewSubmission, NotFound, RequestIdConflict, Store};
 use crate::timing::Deadline;
 
@@ -32,6 +33,8 @@ pub struct AppState {
     /// leases wait for them (design 7.3 ⑥).
     reconnect: Arc<Mutex<(HashSet<String>, Deadline)>>,
     stopping: Arc<AtomicBool>,
+    /// The latest resource measurements (design 9).
+    pub measurements: Arc<Mutex<Snapshot>>,
 }
 
 impl AppState {
@@ -43,6 +46,7 @@ impl AppState {
             changes: Arc::new(tokio::sync::watch::channel(0).0),
             reconnect: Arc::new(Mutex::new((HashSet::new(), Deadline::after(None)))),
             stopping: Arc::new(AtomicBool::new(false)),
+            measurements: Arc::new(Mutex::new(Snapshot::default())),
         }
     }
 
@@ -88,6 +92,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/jobs", get(list_jobs).post(submit))
         .route("/v1/submissions/{id}", get(submission))
+        .route("/v1/measurements", get(measurements))
         .merge(lifecycle::routes())
         .with_state(state)
 }
@@ -220,6 +225,10 @@ async fn list_jobs(State(s): State<AppState>, Query(q): Query<ListQuery>) -> Api
         .store()
         .list_jobs(&states, q.limit.unwrap_or(100).min(1000))?;
     Ok(Json(jobs).into_response())
+}
+
+async fn measurements(State(s): State<AppState>) -> Json<Snapshot> {
+    Json(s.measurements.lock().expect("measurements lock").clone())
 }
 
 async fn submission(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
