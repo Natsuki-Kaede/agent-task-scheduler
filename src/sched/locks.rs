@@ -109,14 +109,15 @@ const PROJECT_MARKERS: &[&str] = &[
     "Makefile",
 ];
 
-/// The project around `dir`: the Git worktree root, else the nearest
-/// directory with a project marker file, else `dir`.
+/// The project around `dir`: the nearest directory with a project marker
+/// file, else the Git worktree root, else `dir`. Several projects in one
+/// repository each get their own root, so their builds do not share locks.
 pub fn project_root(dir: &Path) -> PathBuf {
-    if let Some(git) = dir.ancestors().find(|d| d.join(".git").exists()) {
-        return git.to_path_buf();
-    }
-    dir.ancestors()
-        .find(|d| PROJECT_MARKERS.iter().any(|m| d.join(m).is_file()))
+    let marked = dir
+        .ancestors()
+        .find(|d| PROJECT_MARKERS.iter().any(|m| d.join(m).is_file()));
+    marked
+        .or_else(|| dir.ancestors().find(|d| d.join(".git").exists()))
         .unwrap_or(dir)
         .to_path_buf()
 }
@@ -213,13 +214,17 @@ mod tests {
         let repo = dir.path().join("repo");
         let app = repo.join("packages/app");
         std::fs::create_dir_all(app.join("src")).unwrap();
-        std::fs::write(app.join("package.json"), "{}").unwrap();
-        assert_eq!(project_root(&app.join("src")), app);
         std::fs::create_dir(repo.join(".git")).unwrap();
         assert_eq!(
             project_root(&app.join("src")),
             repo,
-            "Git worktree root wins"
+            "no marker: the Git root"
+        );
+        std::fs::write(app.join("package.json"), "{}").unwrap();
+        assert_eq!(
+            project_root(&app.join("src")),
+            app,
+            "the nearest marker wins"
         );
         let plain = dir.path().join("plain");
         std::fs::create_dir(&plain).unwrap();
@@ -258,5 +263,22 @@ mod tests {
             locks("adb install app.apk", &["device:phone"]),
             ["named:device:phone"]
         );
+    }
+
+    #[test]
+    fn crates_in_one_repository_build_in_parallel() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let profiles = Profiles::builtin();
+        let r = Recognizer::new(&profiles, &[]);
+        let lock = |name: &str| {
+            let krate = repo.join(name);
+            std::fs::create_dir_all(&krate).unwrap();
+            std::fs::write(krate.join("Cargo.toml"), "").unwrap();
+            for_line(&r.shell("cargo build", &krate), &krate, &profiles, &[])
+        };
+        let (a, b) = (lock("a"), lock("b"));
+        assert!(!a[0].conflicts(&b[0]), "{a:?} {b:?}");
     }
 }
