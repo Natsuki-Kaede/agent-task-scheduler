@@ -1,12 +1,12 @@
-src/daemon/pressure.rs
-  s_bb9527a6cd4695::t_0f4d8a8c6bd523 17-18,85-95,107,158-162
-src/store/mod.rs
-  s_bb9527a6cd4695::t_0f4d8a8c6bd523 15-16
+src/sched/locks.rs
+  s_bb9527a6cd4695::t_22242ec8d95bba 261
+profiles/builtin.toml
+  s_bb9527a6cd4695::t_22242ec8d95bba 389,408
 ---
 {
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "1.7.5",
-  "base_commit_sha": "6059be9fe956fe7393b3ea5c2575e2e46389d68c",
+  "base_commit_sha": "67f179ae5003eb429f366751cd78a7b8c40a4a9c",
   "prompts": {},
   "sessions": {
     "s_bb9527a6cd4695": {
