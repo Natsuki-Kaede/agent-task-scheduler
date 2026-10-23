@@ -1,0 +1,36 @@
+src/main.rs
+  s_bb9527a6cd4695::t_0a663c241e6f35 15,105-109,165-170,199-209
+src/config.rs
+  s_bb9527a6cd4695::t_c11e7f0fff6025 12,23-37
+  s_bb9527a6cd4695::t_2983c91670c42a 38
+tests/hook.rs
+  s_bb9527a6cd4695::t_efe51219685759 16-21,38,49-59,61-67,78-83
+  s_bb9527a6cd4695::t_01db4d238e08ae 1-15,22-37,39-48,60,68-77,84-86
+src/hook.rs
+  s_bb9527a6cd4695::t_aee66d45cfbf02 87,184,212,214,224,226-227
+  s_bb9527a6cd4695::t_acee526c693640 106-109,151-155,159-168,174-176,188-196,199-206,216-217,221-223,228-233,239-299,301,304-370,372,375-400
+  s_bb9527a6cd4695::t_297ae4d33be1e8 1-86,88-105,110-123,125-150,156-158,169-173,177-183,185-187,197-198,207-211,213,215,218-220,225,234-238,401
+  s_bb9527a6cd4695::t_6a3bdaeeeef56f 373-374
+  s_bb9527a6cd4695::t_b116b99b05415b 124
+  s_bb9527a6cd4695::t_a4cbd7d896d8eb 300
+  s_bb9527a6cd4695::t_6abe6231d22b45 302-303
+  s_bb9527a6cd4695::t_1f84c768fd91ae 371
+AGENTS.md
+  s_bb9527a6cd4695::t_3135928856ed9a 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "55940b659da9a7352b9f2e539d121691de0faca2",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
