@@ -239,15 +239,24 @@ pub async fn run(
     if reached {
         if let Some(code) = sub["main_exit_code"].as_i64() {
             print_output(&sub)?;
+            delivered(paths, &sub).await;
             return Ok(exit_code(code));
         }
         if sub["job_state"] == "start_failed" {
             print_output(&sub)?;
+            delivered(paths, &sub).await;
             return Ok(exit_code(sub["exit_code"].as_i64().unwrap_or(127)));
         }
     }
     eprintln!("{}", status_line(&sub));
     Ok(ExitCode::from(EXIT_DETACHED))
+}
+
+/// The submission's result has reached the agent: reminders leave it out
+/// (design 6.2). Should the daemon miss this, a reminder names it once.
+async fn delivered(paths: &Paths, sub: &Value) {
+    let id = sub["id"].as_str().unwrap_or_default();
+    let _ = client::call(paths, "POST", &format!("/v1/submissions/{id}/quiet"), None).await;
 }
 
 fn terminal_line(sub: &Value) -> String {
@@ -285,6 +294,7 @@ async fn blocked(paths: &Paths, sub: &Value) -> Result<ExitCode> {
         sub["id"].as_str().unwrap_or("?"),
         sub["id"].as_str().unwrap_or("?"),
     );
+    delivered(paths, sub).await;
     Ok(ExitCode::from(EXIT_BLOCKED))
 }
 
@@ -295,6 +305,7 @@ pub async fn wait(paths: &Paths, submission: &str, wait: Option<Duration>) -> Re
         return blocked(paths, &sub).await;
     }
     if reached {
+        delivered(paths, &sub).await;
         return Ok(report_terminal(&sub));
     }
     eprintln!("{}", status_line(&sub));
@@ -318,6 +329,7 @@ pub async fn status_one(paths: &Paths, id: &str, json_out: bool) -> Result<ExitC
             row["command"].as_str().unwrap_or("")
         );
     } else if row["job_state"].as_str().is_some_and(is_terminal) {
+        delivered(paths, &row).await;
         report_terminal(&row);
     } else {
         println!("{}", status_line(&row));

@@ -1,21 +1,34 @@
-//! Agent hooks (design 6.1, 6.3). `PreToolUse` rewrites a shell command
+//! Agent hooks (design 6.1–6.3). `PreToolUse` rewrites a shell command
 //! into `ats run --session <id> --sh '<command>'` unless it should run as
 //! it is. Rewriting is local: it reads profiles and the configuration but
 //! never contacts the daemon. The answer carries no permission decision,
 //! so the agent's own permission checks still apply to every command.
+//!
+//! `Stop` and `UserPromptSubmit` remind the agent of its session's
+//! submissions. When the daemon cannot be reached they let everything
+//! through and change nothing.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
+use crate::client;
 use crate::config::Config;
 use crate::executor::JOB_ENV;
 use crate::paths::Paths;
 use crate::profile::Profiles;
 use crate::recognize::Recognizer;
+use crate::store::Reminder;
+
+/// How long a reminder waits for the request-file channel when the socket
+/// cannot be reached, so a stopped daemon delays the agent only briefly.
+const REMINDER_TIMEOUT: Duration = Duration::from_secs(1);
+/// Commands in reminders are cut to this many characters.
+const COMMAND_CHARS: usize = 120;
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Agent {
@@ -26,6 +39,8 @@ pub enum Agent {
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     PreToolUse,
+    Stop,
+    UserPromptSubmit,
 }
 
 /// What the hook tells the agent.
@@ -70,14 +85,96 @@ impl Setup {
 }
 
 /// Reads the hook input from stdin and answers it.
-pub fn run(paths: &Paths, agent: Agent, event: Event) -> Result<Answer> {
+pub async fn run(paths: &Paths, agent: Agent, event: Event) -> Result<Answer> {
     let mut text = String::new();
     std::io::stdin().read_to_string(&mut text)?;
     let input: Value = serde_json::from_str(&text).context("reading the hook input")?;
-    let setup = Setup::load(paths, agent)?;
     Ok(match event {
-        Event::PreToolUse => pre_tool_use(&input, &setup),
+        Event::PreToolUse => pre_tool_use(&input, &Setup::load(paths, agent)?),
+        Event::Stop => stop(paths, &input).await,
+        Event::UserPromptSubmit => user_prompt_submit(paths, &input).await,
     })
+}
+
+/// The daemon's reminders for this session, or `None` when there is no
+/// session or the daemon cannot answer.
+async fn reminders(
+    paths: &Paths,
+    method: &str,
+    input: &Value,
+    what: &str,
+) -> Option<Vec<Reminder>> {
+    let session = input["session_id"].as_str()?;
+    let path = format!("/v1/sessions/{session}/{what}");
+    match client::call_with_timeout(paths, method, &path, None, REMINDER_TIMEOUT).await {
+        Ok((answer, _)) if answer.status == 200 => serde_json::from_value(answer.body).ok(),
+        Ok((answer, _)) => {
+            eprintln!("ats: {path}: daemon answered {}", answer.status);
+            None
+        }
+        Err(e) => {
+            eprintln!("ats: {path}: {e:#}");
+            None
+        }
+    }
+}
+
+fn line(r: &Reminder) -> String {
+    let mut command: String = r.command.chars().take(COMMAND_CHARS).collect();
+    if command.len() < r.command.len() {
+        command.push('…');
+    }
+    let code = r
+        .exit_code
+        .map(|c| format!(", exit code {c}"))
+        .unwrap_or_default();
+    format!(
+        "- {} (job {}) {}{code}: {command}",
+        r.submission, r.job, r.state
+    )
+}
+
+/// Stops the agent once while its session still has submissions running
+/// (design 6.2); a second stop goes through.
+async fn stop(paths: &Paths, input: &Value) -> Answer {
+    if input["stop_hook_active"] == true {
+        return Answer::Nothing;
+    }
+    let Some(running) = reminders(paths, "GET", input, "running")
+        .await
+        .filter(|r| !r.is_empty())
+    else {
+        return Answer::Nothing;
+    };
+    let lines: Vec<String> = running.iter().map(line).collect();
+    Answer::Json(json!({
+        "decision": "block",
+        "reason": format!(
+            "ats: submissions from this session are still running. Wait for each with `ats wait <submission>`, or leave it running with `ats detach <submission>`:\n{}",
+            lines.join("\n")
+        ),
+    }))
+}
+
+/// Tells the agent which of its submissions ended since it last heard, each
+/// once (design 6.2).
+async fn user_prompt_submit(paths: &Paths, input: &Value) -> Answer {
+    let Some(ended) = reminders(paths, "POST", input, "ended")
+        .await
+        .filter(|r| !r.is_empty())
+    else {
+        return Answer::Nothing;
+    };
+    let lines: Vec<String> = ended.iter().map(line).collect();
+    Answer::Json(json!({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": format!(
+                "ats: submissions from this session ended since your last turn; `ats wait <submission>` shows the result:\n{}",
+                lines.join("\n")
+            ),
+        }
+    }))
 }
 
 pub fn pre_tool_use(input: &Value, setup: &Setup) -> Answer {

@@ -26,7 +26,9 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/jobs/{id}/control", get(control))
         .route("/v1/submissions/{id}/wait", post(wait))
         .route("/v1/submissions/{id}/cancel", post(cancel))
-        .route("/v1/submissions/{id}/detach", post(detach))
+        .route("/v1/submissions/{id}/quiet", post(quiet))
+        .route("/v1/sessions/{id}/running", get(running))
+        .route("/v1/sessions/{id}/ended", post(ended))
         .route("/v1/jobs/{id}/why", get(why))
         .route("/v1/jobs/{id}/unblock", post(unblock))
 }
@@ -251,8 +253,8 @@ async fn cancel(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<
     ok()
 }
 
-async fn detach(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    s.store().detach_submission(&id)?;
+async fn quiet(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    s.store().quiet_submission(&id)?;
     s.notify();
     ok()
 }
@@ -272,6 +274,17 @@ async fn unblock(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult
     s.store().unblock(&id)?;
     s.notify();
     ok()
+}
+
+/// A session's submissions still running, for the `Stop` reminder.
+async fn running(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    Ok(Json(s.store().running_reminders(&id)?).into_response())
+}
+
+/// A session's submissions that ended unreported, for the
+/// `UserPromptSubmit` reminder; each is reported once.
+async fn ended(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    Ok(Json(s.store().take_ended_reminders(&id)?).into_response())
 }
 
 #[cfg(test)]

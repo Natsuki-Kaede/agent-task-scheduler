@@ -267,14 +267,40 @@ paths:
         '204': { description: Recorded }
         '404': { $ref: '#/components/responses/Error' }
 
-  /v1/submissions/{id}/detach:
+  /v1/submissions/{id}/quiet:
     post:
-      summary: Mark a submission as left to run in the background
+      summary: Leave a submission out of reminders
+      description: Set by `ats detach`, and by the CLI once the submission's result has reached the agent.
       parameters:
         - { $ref: '#/components/parameters/Id' }
       responses:
         '204': { description: Recorded }
         '404': { $ref: '#/components/responses/Error' }
+
+  /v1/sessions/{id}/running:
+    get:
+      summary: A session's submissions still running and not quiet, for the Stop reminder
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Reminder' } }
+
+  /v1/sessions/{id}/ended:
+    post:
+      summary: A session's ended submissions not yet reported, for the UserPromptSubmit reminder
+      description: The submissions returned become quiet, so each is reported once.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Reminder' } }
 
   /v1/jobs/{id}/why:
     get:
@@ -441,6 +467,15 @@ components:
         swap_outs: { type: number, description: Pages swapped out per second since the previous sample }
         jobs: { type: object, additionalProperties: { $ref: '#/components/schemas/JobUsage' } }
 
+    Reminder:
+      type: object
+      properties:
+        submission: { type: string }
+        job: { type: string }
+        state: { $ref: '#/components/schemas/JobState' }
+        exit_code: { type: [integer, 'null'] }
+        command: { type: string }
+
     Submission:
       type: object
       properties:
@@ -452,4 +487,4 @@ components:
         main_exit_code: { type: [integer, 'null'] }
         log_path: { type: [string, 'null'] }
         canceled: { type: boolean }
-        detached: { type: boolean }
+        quiet: { type: boolean, description: Reminders leave it out }

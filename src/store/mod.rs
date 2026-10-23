@@ -111,7 +111,19 @@ pub struct SubmissionRow {
     pub main_exit_code: Option<i64>,
     pub log_path: Option<String>,
     pub canceled: bool,
-    pub detached: bool,
+    /// Reminders leave it out: detached, its result already reached the
+    /// agent, or it was reported once (design 6.2).
+    pub quiet: bool,
+}
+
+/// A submission a reminder names.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct Reminder {
+    pub submission: String,
+    pub job: String,
+    pub state: String,
+    pub exit_code: Option<i64>,
+    pub command: String,
 }
 
 /// A job that has not ended, as the recovery check sees it.
@@ -292,7 +304,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT s.id, s.job_id, j.state, s.session_id, j.exit_code, j.main_exit_code, j.log_path,
-                        s.canceled, s.detached
+                        s.canceled, s.quiet
                  FROM submissions s JOIN jobs j ON j.id = s.job_id WHERE s.id = ?1",
                 params![id],
                 |r| {
@@ -305,7 +317,7 @@ impl Store {
                         main_exit_code: r.get(5)?,
                         log_path: r.get(6)?,
                         canceled: r.get(7)?,
-                        detached: r.get(8)?,
+                        quiet: r.get(8)?,
                     })
                 },
             )
@@ -527,8 +539,48 @@ impl Store {
         Ok(job)
     }
 
-    pub fn detach_submission(&mut self, id: &str) -> Result<String> {
-        self.update_submission(id, "detached = 1")
+    pub fn quiet_submission(&mut self, id: &str) -> Result<String> {
+        self.update_submission(id, "quiet = 1")
+    }
+
+    fn reminders(conn: &Connection, session: &str, ended: bool) -> Result<Vec<Reminder>> {
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT s.id, s.job_id, j.state, j.exit_code, j.command FROM submissions s JOIN jobs j ON j.id = s.job_id
+             WHERE s.session_id = ?1 AND s.quiet = 0 AND s.canceled = 0 AND j.state {} IN ({})
+             ORDER BY s.created_at",
+            if ended { "" } else { "NOT" },
+            sched::in_list(TERMINAL)
+        ))?;
+        let rows = stmt.query_map(params![session], |r| {
+            Ok(Reminder {
+                submission: r.get(0)?,
+                job: r.get(1)?,
+                state: r.get(2)?,
+                exit_code: r.get(3)?,
+                command: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// A session's submissions that have not ended and are not quiet.
+    pub fn running_reminders(&self, session: &str) -> Result<Vec<Reminder>> {
+        Self::reminders(&self.conn, session, false)
+    }
+
+    /// A session's ended submissions that are not quiet; they are quiet
+    /// afterwards, so each is reported once.
+    pub fn take_ended_reminders(&mut self, session: &str) -> Result<Vec<Reminder>> {
+        let tx = self.conn.transaction()?;
+        let ended = Self::reminders(&tx, session, true)?;
+        for r in &ended {
+            tx.execute(
+                "UPDATE submissions SET quiet = 1 WHERE id = ?1",
+                params![r.submission],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ended)
     }
 
     /// True when every submission of the job is canceled, so the job
@@ -544,11 +596,10 @@ impl Store {
 }
 
 /// Terminal job states (design 5.1).
+pub const TERMINAL: &[&str] = &["completed", "start_failed", "canceled", "ended_unknown"];
+
 pub fn is_terminal(state: &str) -> bool {
-    matches!(
-        state,
-        "completed" | "start_failed" | "canceled" | "ended_unknown"
-    )
+    TERMINAL.contains(&state)
 }
 
 #[cfg(test)]
@@ -605,6 +656,41 @@ mod tests {
             500,
             "the reservation follows the peak"
         );
+    }
+
+    #[test]
+    fn reminders_name_each_submission_until_it_is_quiet() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut submit = |session: Option<&str>| {
+            let mut new = sample("make");
+            new.session_id = session.map(str::to_string);
+            store.create_submission(&new).unwrap()
+        };
+        let (running, ended, delivered, canceled) = (
+            submit(Some("s")),
+            submit(Some("s")),
+            submit(Some("s")),
+            submit(Some("s")),
+        );
+        submit(Some("another session"));
+        store.finish(&ended.job, "completed", Some(0)).unwrap();
+        store.finish(&delivered.job, "completed", Some(1)).unwrap();
+        store.quiet_submission(&delivered.submission).unwrap();
+        store.cancel_submission(&canceled.submission).unwrap();
+        let ids = |r: Vec<Reminder>| r.into_iter().map(|r| r.submission).collect::<Vec<_>>();
+        assert_eq!(
+            ids(store.running_reminders("s").unwrap()),
+            std::slice::from_ref(&running.submission)
+        );
+        assert_eq!(
+            ids(store.take_ended_reminders("s").unwrap()),
+            std::slice::from_ref(&ended.submission)
+        );
+        assert!(
+            store.take_ended_reminders("s").unwrap().is_empty(),
+            "reported once"
+        );
+        assert!(store.submission(&ended.submission).unwrap().unwrap().quiet);
     }
 
     #[test]

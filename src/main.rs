@@ -100,7 +100,8 @@ enum Command {
     Unblock { id: String },
     /// Cancel a submission; the job stops when no other submission wants it.
     Cancel { submission: String },
-    /// Mark a submission as left to run in the background.
+    /// Leave a submission running in the background; reminders stop
+    /// naming it.
     Detach { submission: String },
     /// Answer an agent hook: the hook input on stdin, the answer on stdout.
     Hook {
@@ -179,7 +180,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Why { id } => cli::why(&paths, &id).await,
         Command::Unblock { id } => cli::unblock(&paths, &id).await,
         Command::Cancel { submission } => cli::mark(&paths, &submission, "cancel").await,
-        Command::Detach { submission } => cli::mark(&paths, &submission, "detach").await,
+        Command::Detach { submission } => cli::mark(&paths, &submission, "quiet").await,
         Command::Status { state, json, .. } => {
             let path = match state {
                 Some(s) => format!("/v1/jobs?state={s}"),
@@ -196,7 +197,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Hook { agent, event } => match hook::run(&paths, agent, event)? {
+        Command::Hook { agent, event } => match hook::run(&paths, agent, event).await? {
             hook::Answer::Nothing => Ok(ExitCode::SUCCESS),
             hook::Answer::Json(out) => {
                 println!("{out}");

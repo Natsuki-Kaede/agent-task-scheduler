@@ -84,3 +84,89 @@ fn runs_directly_inside_a_job() {
     assert_eq!(out.status.code(), Some(7));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "nested\n");
 }
+
+fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+    let start = std::time::Instant::now();
+    while !ok() {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "timed out: {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn reminds_the_session_of_its_submissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let hook = |event: &str, input: serde_json::Value| -> serde_json::Value {
+        let out = ats(&home, &["hook", "claude", event], &input.to_string(), &[]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap_or_default()
+    };
+    let stop = |active: bool| {
+        hook(
+            "stop",
+            serde_json::json!({"session_id": "s1", "stop_hook_active": active}),
+        )
+    };
+    let prompt = || {
+        hook(
+            "user-prompt-submit",
+            serde_json::json!({"session_id": "s1"}),
+        )
+    };
+
+    // Without a daemon, every reminder lets the agent through.
+    assert!(stop(false).is_null() && prompt().is_null());
+
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_ats"))
+        .arg("daemon")
+        .env("ATS_HOME", &home)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("daemon", || {
+        ats(&home, &["status"], "", &[]).status.success()
+    });
+    let run = |args: &[&str]| {
+        let mut all = vec!["run", "--session", "s1"];
+        all.extend_from_slice(args);
+        ats(&home, &all, "", &[])
+    };
+    // A result the agent already got is not mentioned; one left running is.
+    assert!(run(&["--sh", "echo done"]).status.success());
+    let out = run(&["--no-wait", "--sh", "sleep 2"]);
+    assert_eq!(out.status.code(), Some(75));
+    let line = String::from_utf8_lossy(&out.stderr).to_string();
+    let submission = line.split_whitespace().nth(2).unwrap().to_string();
+
+    let blocked = stop(false);
+    assert_eq!(blocked["decision"], "block");
+    let reason = blocked["reason"].as_str().unwrap();
+    assert!(
+        reason.contains(&submission) && reason.contains("sleep 2") && !reason.contains("echo done"),
+        "{reason}"
+    );
+    assert!(stop(true).is_null(), "a second stop goes through");
+    assert!(prompt().is_null(), "nothing has ended yet");
+
+    wait_until("job end", || stop(false).is_null());
+    let context = prompt()["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        context.contains(&submission) && context.contains("exit code 0"),
+        "{context}"
+    );
+    assert!(prompt().is_null(), "reported once");
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
