@@ -130,9 +130,17 @@ fn pressure_settling_and_recovery_hold_admission() {
     r.settling = true;
     assert_eq!(
         verdict(&decide(&r), "a"),
+        &Verdict::Admit,
+        "wide headroom: no wait for settling"
+    );
+    let mut tight = round(&cap(13 * G), &[], &waiting);
+    tight.settling = true;
+    assert_eq!(
+        verdict(&decide(&tight), "a"),
         &Verdict::Wait {
             reason: Reason::Settling
-        }
+        },
+        "3G of 16G free is tight"
     );
     r.settling = false;
     r.admitting = false;

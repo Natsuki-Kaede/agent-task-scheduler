@@ -246,25 +246,40 @@ mod tests {
             "cores / (running + 1)"
         );
 
-        // While a and a2 settle, the next admission waits.
+        // With 8G of headroom the next job starts while a and a2 settle.
         let b = submit(&state, G, &[]);
         let too_big = submit(&state, 20 * G, &[]);
         round(&state, &mut admissions).unwrap();
-        assert_eq!(reason(&state, &b), sched::Reason::Settling);
+        assert_eq!(job_state(&state, &b), "admitted");
         assert_eq!(job_state(&state, &too_big), "capacity_insufficient");
 
+        // With 3G of 16G free, the next waits for them to settle.
+        state
+            .measurements
+            .lock()
+            .unwrap()
+            .system
+            .as_mut()
+            .unwrap()
+            .mem_used = 8 * G;
+        let b2 = submit(&state, G, &[]);
+        round(&state, &mut admissions).unwrap();
+        assert_eq!(reason(&state, &b2), sched::Reason::Settling);
+
         // A failed predecessor blocks; once the new jobs end, nothing settles.
-        state.store().finish(&a, "completed", Some(1)).unwrap();
-        state.store().finish(&a2, "completed", Some(0)).unwrap();
+        for job in [&a, &a2, &b] {
+            let code = if job == &a { 1 } else { 0 };
+            state.store().finish(job, "completed", Some(code)).unwrap();
+        }
         let c = submit(&state, G, &[&a]);
         round(&state, &mut admissions).unwrap();
         assert_eq!(job_state(&state, &c), "blocked");
-        assert_eq!(job_state(&state, &b), "admitted");
+        assert_eq!(job_state(&state, &b2), "admitted");
         state.store().unblock(&c).unwrap();
         assert_eq!(job_state(&state, &c), "queued");
 
         // Pressure holds admission.
-        state.store().finish(&b, "completed", Some(0)).unwrap();
+        state.store().finish(&b2, "completed", Some(0)).unwrap();
         state.pressure.lock().unwrap().pressured = true;
         round(&state, &mut admissions).unwrap();
         assert_eq!(reason(&state, &c), sched::Reason::Pressure);

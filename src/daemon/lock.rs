@@ -47,6 +47,12 @@ mod tests {
         let err = super::acquire(&path).err().expect("second lock must fail");
         assert!(err.to_string().contains(&std::process::id().to_string()));
         drop(first);
-        super::acquire(&path).unwrap();
+        // Other tests fork children concurrently; between fork and exec a
+        // child briefly holds a copy of the descriptor, and with it the lock.
+        let start = std::time::Instant::now();
+        while let Err(e) = super::acquire(&path) {
+            assert!(start.elapsed().as_secs() < 2, "{e:#}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }
