@@ -1,0 +1,42 @@
+src/store/mod.rs
+  s_bb9527a6cd4695::t_aef730beed7412 120
+  s_bb9527a6cd4695::t_951f8ae53673ba 114-119,121-126,307,320,542-576,581-583,599-600,602,694
+  s_bb9527a6cd4695::t_b67b22ed64c840 669,675
+  s_bb9527a6cd4695::t_c947351a0a43ca 577-580,661-668,670-674,676-682,684-686,688-693
+  s_bb9527a6cd4695::t_14534208cba663 683,687
+  s_bb9527a6cd4695::t_44c126dd78569c 695
+api/openapi.yaml
+  s_bb9527a6cd4695::t_b67b22ed64c840 270,272-273,280-304,470-478,490
+tests/hook.rs
+  s_bb9527a6cd4695::t_c947351a0a43ca 87-172
+src/store/schema.sql
+  s_bb9527a6cd4695::t_73423825aec4aa 40
+src/cli.rs
+  s_bb9527a6cd4695::t_da7f4e3bc917b0 242,247,255-261,297,308,332
+src/hook.rs
+  s_bb9527a6cd4695::t_c947351a0a43ca 101-106,127-134,143-146,162-165
+  s_bb9527a6cd4695::t_aef730beed7412 1,6-9,14,19,25-31,42-43,88,93-95,99-100,107-126,135-142,147-161,166-178
+  s_bb9527a6cd4695::t_6a6f29400af577 179
+src/main.rs
+  s_bb9527a6cd4695::t_951f8ae53673ba 103-104,183
+  s_bb9527a6cd4695::t_aef730beed7412 200
+src/api/lifecycle.rs
+  s_bb9527a6cd4695::t_951f8ae53673ba 29-31,256-257,279-288
+  s_bb9527a6cd4695::t_af2d13f9d88a67 289
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5a9099512f2de16713bdd5f5a3c322a0954af35d",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
