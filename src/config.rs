@@ -9,7 +9,6 @@ use crate::paths::Paths;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub recognize: Recognize,
-    pub hook: Hooks,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -18,22 +17,6 @@ pub struct Recognize {
     /// Programs that run the rest of their arguments as a command, such as
     /// output filters, removed before recognition (design 8.1).
     pub wrappers: Vec<String>,
-}
-
-/// Other agents' command-rewriting hooks that ats runs first, in order,
-/// before it wraps the result (design 6.1). `ats install` writes these.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Hooks {
-    pub claude: Chain,
-    pub codex: Chain,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Chain {
-    /// Shell commands, each given the hook input on stdin.
-    pub chain: Vec<String>,
 }
 
 impl Config {

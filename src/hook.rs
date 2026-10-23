@@ -70,10 +70,7 @@ pub struct Setup {
 impl Setup {
     pub fn load(paths: &Paths, agent: Agent) -> Result<Setup> {
         let config = Config::load(paths)?;
-        let chain = match agent {
-            Agent::Claude => config.hook.claude.chain,
-            Agent::Codex => config.hook.codex.chain,
-        };
+        let chain = crate::install::Record::load(paths)?.chain(agent);
         Ok(Setup {
             profiles: Profiles::load(Some(&paths.profiles))?,
             wrappers: config.recognize.wrappers,
@@ -332,7 +329,7 @@ fn ats_command(command: &str, session: Option<&str>, setup: &Setup) -> Option<Op
 
 /// POSIX shell quoting: plain words as they are, anything else in single
 /// quotes.
-fn quote(s: &str) -> String {
+pub fn quote(s: &str) -> String {
     let plain = !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));

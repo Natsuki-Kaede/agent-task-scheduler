@@ -27,18 +27,18 @@ fn rewrites_through_the_configured_chain() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    // Another rewriting hook that prefixes every command with `wrap`.
+    // Another rewriting hook that prefixes every command with `wrap`,
+    // moved into ats's chain by `ats install`.
     std::fs::write(
         home.join("config.toml"),
-        r#"
-[recognize]
-wrappers = ["wrap"]
-
-[hook.claude]
-chain = ["python3 -c 'import json,sys; c = json.load(sys.stdin)[\"tool_input\"][\"command\"]; print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"updatedInput\": {\"command\": \"wrap \" + c}}}))'"]
-"#,
+        "[recognize]\nwrappers = [\"wrap\"]\n",
     )
     .unwrap();
+    let wrap = r#"python3 -c 'import json,sys; c = json.load(sys.stdin)["tool_input"]["command"]; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {"command": "wrap " + c}}}))'"#;
+    let record = serde_json::json!({ "agents": { "claude": [
+        { "group": 0, "index": 0, "hook": { "type": "command", "command": wrap } }
+    ] } });
+    std::fs::write(home.join("installed.json"), record.to_string()).unwrap();
     let input = |command: &str| {
         serde_json::json!({
             "session_id": "s1", "cwd": dir.path(), "hook_event_name": "PreToolUse",

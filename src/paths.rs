@@ -18,6 +18,8 @@ pub struct Paths {
     pub lock: PathBuf,
     pub logs: PathBuf,
     pub config: PathBuf,
+    /// What `ats install` changed, for the hook chain and `ats uninstall`.
+    pub installed: PathBuf,
     /// User tool profiles (design 8.2).
     pub profiles: PathBuf,
     /// Request-file channel. It lives under the temporary directory because
@@ -53,6 +55,7 @@ impl Paths {
             lock: home.join("daemon.lock"),
             logs: home.join("logs"),
             config: home.join("config.toml"),
+            installed: home.join("installed.json"),
             profiles: home.join("profiles.d"),
             home,
             requests,

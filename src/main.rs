@@ -14,6 +14,7 @@ mod daemon;
 mod executor;
 mod hook;
 mod ids;
+mod install;
 mod paths;
 mod procinfo;
 mod profile;
@@ -28,7 +29,7 @@ mod timing;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -103,6 +104,18 @@ enum Command {
     /// Leave a submission running in the background; reminders stop
     /// naming it.
     Detach { submission: String },
+    /// Add ats's hooks and instructions to Claude Code and Codex, after
+    /// showing the changes and asking.
+    Install {
+        /// Only this agent; by default every agent set up on this machine.
+        #[arg(long)]
+        agent: Vec<hook::Agent>,
+    },
+    /// Remove what `ats install` added and put back the hooks it moved.
+    Uninstall {
+        #[arg(long)]
+        agent: Vec<hook::Agent>,
+    },
     /// Answer an agent hook: the hook input on stdin, the answer on stdout.
     Hook {
         agent: hook::Agent,
@@ -195,6 +208,35 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             } else {
                 print_jobs(&answer.body);
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Install { agent } => {
+            let home = dirs::home_dir().context("no home directory")?;
+            let agents = install::agents(&home, &agent);
+            if agents.is_empty() {
+                anyhow::bail!("found neither ~/.claude nor ~/.codex; name an agent with --agent");
+            }
+            let ats = std::env::current_exe().context("locating the ats binary")?;
+            install::install(
+                &paths,
+                &home,
+                &agents,
+                &ats,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout(),
+            )?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Uninstall { agent } => {
+            let home = dirs::home_dir().context("no home directory")?;
+            let agents = install::agents(&home, &agent);
+            install::uninstall(
+                &paths,
+                &home,
+                &agents,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout(),
+            )?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Hook { agent, event } => match hook::run(&paths, agent, event).await? {
