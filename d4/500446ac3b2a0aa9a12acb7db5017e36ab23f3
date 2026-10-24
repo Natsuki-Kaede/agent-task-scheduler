@@ -1,0 +1,30 @@
+src/install.rs
+  s_bb9527a6cd4695::t_081634a4bf6a7a 345-348,366-368,483-484,487-488
+  s_bb9527a6cd4695::t_6a5ee632580cd9 779-785
+  s_bb9527a6cd4695::t_7fcdfaa5f75ad8 341-344,349-365,369-381,433,452-456,480-481,485
+  s_bb9527a6cd4695::t_4afaecf666a6f9 778
+src/main.rs
+  s_bb9527a6cd4695::t_081634a4bf6a7a 201-209
+src/hook.rs
+  s_bb9527a6cd4695::t_6a5ee632580cd9 94-96,162-167,172-173,343,504-512,620-688
+  s_bb9527a6cd4695::t_b305a00a40124f 383-385
+  s_bb9527a6cd4695::t_081634a4bf6a7a 179,182,333-335,345-348,366-370,387-391,395-398
+  s_bb9527a6cd4695::t_7fcdfaa5f75ad8 161,168-171,174-178,183-189,191,195,238-241,250-257,315-323,325,329-332,336-342,365,371-382,386,392-394,399-403
+  s_bb9527a6cd4695::t_e5da1561bbc11a 689
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d4500446ac3b2a0aa9a12acb7db5017e36ab23f3",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
