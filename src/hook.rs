@@ -348,10 +348,16 @@ fn rewrite(command: &str, cwd: &Path, session: Option<&str>, setup: &Setup) -> O
         });
     }
     let analysis = Recognizer::new(&setup.profiles, &setup.wrappers).shell(command, cwd);
+    // Loops and other lines whose structure is unclear list no commands,
+    // so their words are checked instead.
     let ats_inside = analysis
         .segments
         .iter()
-        .any(|s| s.tool.as_deref() == Some("ats"));
+        .any(|s| s.tool.as_deref() == Some("ats"))
+        || (analysis.structure.is_none()
+            && command
+                .split(|c: char| c.is_whitespace() || ";|&()`$".contains(c))
+                .any(|w| w == "ats" || w.ends_with("/ats")));
     if ats_inside
         || analysis.light
         || analysis.interactive
@@ -521,6 +527,11 @@ mod tests {
                 Some("/opt/ats run --session s1 --sh 'make'"),
             ),
             ("make && ats wait s_1", None),
+            ("for i in 1 2 3; do ats wait s_1 && break; done", None),
+            (
+                "for i in 1 2; do make; done",
+                Some("/opt/ats run --session s1 --sh 'for i in 1 2; do make; done'"),
+            ),
         ] {
             let answer = pre_tool_use(&input(src, dir.path()), &s);
             assert_eq!(command(&answer), want, "{src:?}");
