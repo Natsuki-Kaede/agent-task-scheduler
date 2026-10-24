@@ -475,7 +475,9 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
 
 /// A unified diff from the system's `diff`.
 fn diff(path: &Path, old: &str, new: &str) -> Result<String> {
-    let dir = std::env::temp_dir().join(format!("ats-install-{}", std::process::id()));
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("ats-install-{}-{call}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let (a, b) = (dir.join("old"), dir.join("new"));
     std::fs::write(&a, old)?;

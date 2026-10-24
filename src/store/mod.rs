@@ -19,6 +19,9 @@ pub use sched::{HELD, PRE_LEASE};
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_VERSION: i64 = 1;
 
+/// How long ended jobs, their records and logs are kept (design 11).
+pub const KEEP: std::time::Duration = std::time::Duration::from_secs(90 * 24 * 3600);
+
 /// Current time as an RFC 3339 string with milliseconds.
 pub fn now() -> String {
     humantime::format_rfc3339_millis(SystemTime::now()).to_string()
@@ -568,6 +571,37 @@ impl Store {
         Self::reminders(&self.conn, session, false)
     }
 
+    /// Deletes jobs that ended before `before` (RFC 3339) with their
+    /// submissions and records, keeping predecessors of jobs that have not
+    /// ended (design 11). Returns the log directories of the deleted jobs.
+    pub fn prune(&mut self, before: &str) -> Result<Vec<(String, Option<String>)>> {
+        let terminal = sched::in_list(TERMINAL);
+        let tx = self.conn.transaction()?;
+        let old: Vec<(String, Option<String>)> = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT id, log_path FROM jobs j WHERE state IN ({terminal}) AND ended_at < ?1
+                 AND NOT EXISTS (SELECT 1 FROM dependencies d JOIN jobs k ON k.id = d.job_id
+                                 WHERE d.after_job_id = j.id AND k.state NOT IN ({terminal}))"
+            ))?;
+            let rows = stmt.query_map(params![before], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for (job, _) in &old {
+            for sql in [
+                "DELETE FROM job_events WHERE job_id = ?1",
+                "DELETE FROM locks WHERE job_id = ?1",
+                "DELETE FROM leases WHERE job_id = ?1",
+                "DELETE FROM dependencies WHERE job_id = ?1 OR after_job_id = ?1",
+                "DELETE FROM submissions WHERE job_id = ?1",
+                "DELETE FROM jobs WHERE id = ?1",
+            ] {
+                tx.execute(sql, params![job])?;
+            }
+        }
+        tx.commit()?;
+        Ok(old)
+    }
+
     /// A session's ended submissions that are not quiet; they are quiet
     /// afterwards, so each is reported once.
     pub fn take_ended_reminders(&mut self, session: &str) -> Result<Vec<Reminder>> {
@@ -691,6 +725,41 @@ mod tests {
             "reported once"
         );
         assert!(store.submission(&ended.submission).unwrap().unwrap().quiet);
+    }
+
+    #[test]
+    fn prunes_old_jobs_but_keeps_awaited_predecessors() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut job = |after: &[&str]| {
+            let mut new = sample("make");
+            new.plan.after = after.iter().map(|s| s.to_string()).collect();
+            store.create_submission(&new).unwrap().job
+        };
+        let (old, recent, awaited) = (job(&[]), job(&[]), job(&[]));
+        let waiting = job(&[&awaited]);
+        for j in [&old, &recent, &awaited] {
+            store.finish(j, "completed", Some(0)).unwrap();
+        }
+        for j in [&old, &awaited] {
+            store
+                .conn
+                .execute(
+                    "UPDATE jobs SET ended_at = '2026-01-01T00:00:00.000Z' WHERE id = ?1",
+                    params![j],
+                )
+                .unwrap();
+        }
+        let pruned: Vec<String> = store
+            .prune("2026-07-01T00:00:00.000Z")
+            .unwrap()
+            .into_iter()
+            .map(|(j, _)| j)
+            .collect();
+        assert_eq!(pruned, std::slice::from_ref(&old));
+        assert!(store.job(&old).unwrap().is_none());
+        for j in [&recent, &awaited, &waiting] {
+            assert!(store.job(j).unwrap().is_some());
+        }
     }
 
     #[test]

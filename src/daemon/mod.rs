@@ -23,6 +23,7 @@ use crate::store::{self, HELD, Store};
 const RECONNECT_GRACE: Duration = Duration::from_secs(10);
 const SWEEP_EVERY: Duration = Duration::from_secs(1);
 const SAMPLE_EVERY: Duration = Duration::from_secs(1);
+const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 
 /// Runs the daemon until `shutdown` completes.
 pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
@@ -73,6 +74,17 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
         std::thread::spawn(move || sample_loop(&state))
     };
     let scheduling = tokio::spawn(scheduler::run(state.clone()));
+    let pruning = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = prune(&state) {
+                    tracing::error!("pruning history: {e:#}");
+                }
+                tokio::time::sleep(PRUNE_EVERY).await;
+            }
+        })
+    };
     tracing::info!(socket = %paths.socket.display(), requests = %paths.requests.display(), "ats daemon started");
 
     let stopping = state.clone();
@@ -84,6 +96,7 @@ pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'stat
         .await;
     watcher.abort();
     scheduling.abort();
+    pruning.abort();
     channel.abort();
     let _ = sampling.join();
     let _ = std::fs::remove_file(&paths.socket);
@@ -136,6 +149,27 @@ fn sample_loop(state: &AppState) {
         *state.measurements.lock().expect("measurements lock") = snapshot;
         std::thread::sleep(SAMPLE_EVERY);
     }
+}
+
+/// Deletes ended jobs older than the history window, and their logs.
+fn prune(state: &AppState) -> Result<()> {
+    let before =
+        humantime::format_rfc3339_millis(std::time::SystemTime::now() - store::KEEP).to_string();
+    let pruned = state.store().prune(&before)?;
+    for (job, log) in &pruned {
+        // Each job's log directory is named after it.
+        if let Some(dir) = log
+            .as_deref()
+            .map(std::path::Path::new)
+            .filter(|d| d.file_name().is_some_and(|n| n == job.as_str()))
+        {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    if !pruned.is_empty() {
+        tracing::info!(jobs = pruned.len(), "pruned old history");
+    }
+    Ok(())
 }
 
 /// Resolves when the process receives SIGINT or SIGTERM.

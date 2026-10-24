@@ -1,7 +1,7 @@
 //! Measured history for prediction (design 8.3): completed jobs from the
 //! last 90 days, most recent first.
 
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use rusqlite::params;
@@ -9,8 +9,6 @@ use rusqlite::params;
 use super::Store;
 use crate::sched::predict::Stats;
 
-/// History older than this is not used (design 11: kept 90 days).
-const WINDOW: Duration = Duration::from_secs(90 * 24 * 3600);
 /// Enough recent runs for a percentile.
 const LIMIT: i64 = 200;
 
@@ -30,7 +28,7 @@ impl Store {
         command: Option<&str>,
         key: Option<&str>,
     ) -> Result<Stats> {
-        let since = humantime::format_rfc3339_millis(SystemTime::now() - WINDOW).to_string();
+        let since = humantime::format_rfc3339_millis(SystemTime::now() - super::KEEP).to_string();
         let mut stmt = self.conn.prepare_cached(
             "SELECT peak_private, started_at, ended_at FROM jobs
              WHERE state = 'completed' AND ended_at >= ?1
