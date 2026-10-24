@@ -104,14 +104,15 @@ enum Command {
     /// Leave a submission running in the background; reminders stop
     /// naming it.
     Detach { submission: String },
-    /// Add ats's hooks and instructions to Claude Code and Codex, after
-    /// showing the changes and asking.
+    /// Add ats's hooks and instructions to Claude Code and Codex and start
+    /// the daemon at login, after showing the changes and asking.
     Install {
         /// Only this agent; by default every agent set up on this machine.
         #[arg(long)]
         agent: Vec<hook::Agent>,
     },
     /// Remove what `ats install` added and put back the hooks it moved.
+    /// Without `--agent`, the daemon no longer starts at login.
     Uninstall {
         #[arg(long)]
         agent: Vec<hook::Agent>,
@@ -222,6 +223,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
                 &home,
                 &agents,
                 &ats,
+                true,
                 &mut std::io::stdin().lock(),
                 &mut std::io::stdout(),
             )?;
@@ -234,6 +236,8 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
                 &paths,
                 &home,
                 &agents,
+                agent.is_empty(),
+                true,
                 &mut std::io::stdin().lock(),
                 &mut std::io::stdout(),
             )?;

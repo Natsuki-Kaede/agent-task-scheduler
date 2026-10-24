@@ -1,5 +1,6 @@
-//! `ats install` and `ats uninstall` (design 5.3, 6.1): the agents' hook
-//! configuration and an instruction block in their global instructions.
+//! `ats install` and `ats uninstall` (design 5.3, 6.1, 12): the agents' hook
+//! configuration, an instruction block in their global instructions, and
+//! the LaunchAgent that keeps the daemon running.
 //! Every change is shown as a diff and written only after confirmation,
 //! with a backup of each file first. The hooks moved into ats's chain are
 //! kept as they were in `installed.json`, so uninstall puts them back.
@@ -15,6 +16,8 @@ use serde_json::{Value, json};
 use crate::hook::{Agent, quote};
 use crate::paths::Paths;
 
+/// The LaunchAgent's label and file name.
+const LABEL: &str = "io.github.natsuki-kaede.ats";
 const BEGIN: &str = "<!-- ats:begin -->";
 const END: &str = "<!-- ats:end -->";
 const INSTRUCTIONS: &str = "\
@@ -260,7 +263,82 @@ fn with_block(text: &str) -> String {
     }
 }
 
-/// One file to write; `new` is `None` to remove a file left empty.
+fn launch_agent(home: &Path) -> PathBuf {
+    home.join("Library/LaunchAgents")
+        .join(format!("{LABEL}.plist"))
+}
+
+fn xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Starts `ats daemon` at login and again if it fails. A data directory
+/// chosen with `ATS_HOME` is passed on.
+fn plist(paths: &Paths, ats: &Path) -> String {
+    let env = match std::env::var_os(crate::paths::HOME_ENV) {
+        Some(_) => format!(
+            "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>{}</key>\n    <string>{}</string>\n  </dict>\n",
+            crate::paths::HOME_ENV,
+            xml(&paths.home.to_string_lossy())
+        ),
+        None => String::new(),
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{}</string>
+    <string>daemon</string>
+  </array>
+{env}  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardErrorPath</key>
+  <string>{}</string>
+</dict>
+</plist>
+"#,
+        xml(&ats.to_string_lossy()),
+        xml(&paths.home.join("daemon.log").to_string_lossy())
+    )
+}
+
+/// Loads or unloads the LaunchAgent in this user's session.
+fn launchctl(home: &Path, load: bool, out: &mut impl Write) -> Result<()> {
+    // SAFETY: getuid cannot fail.
+    let domain = format!("gui/{}", unsafe { libc::getuid() });
+    // Unloading first lets a reinstall pick up a changed file; it fails
+    // harmlessly when nothing is loaded.
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", &format!("{domain}/{LABEL}")])
+        .stderr(std::process::Stdio::null())
+        .status();
+    if load {
+        let status = std::process::Command::new("launchctl")
+            .args(["bootstrap", &domain])
+            .arg(launch_agent(home))
+            .status()
+            .context("running launchctl")?;
+        if !status.success() {
+            bail!("launchctl bootstrap failed: {status}");
+        }
+        writeln!(out, "The daemon now runs at login: {LABEL}")?;
+    }
+    Ok(())
+}
+
+/// One file to write; `new` is `None` to remove the file.
 struct Change {
     path: PathBuf,
     old: Option<String>,
@@ -299,11 +377,13 @@ fn ask(input: &mut impl BufRead, out: &mut impl Write, question: &str) -> Result
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
+/// `launchd` loads the LaunchAgent once it is written.
 pub fn install(
     paths: &Paths,
     home: &Path,
     agents: &[Agent],
     ats: &Path,
+    launchd: bool,
     input: &mut impl BufRead,
     out: &mut impl Write,
 ) -> Result<()> {
@@ -344,7 +424,18 @@ pub fn install(
             .or_default()
             .extend(chosen);
     }
-    apply(paths, changes, &record, input, out)?;
+    let service = launch_agent(home);
+    changes.push(Change {
+        old: read(&service)?,
+        new: Some(plist(paths, ats)),
+        path: service,
+    });
+    if !apply(paths, changes, &record, input, out)? {
+        return Ok(());
+    }
+    if launchd {
+        launchctl(home, true, out)?;
+    }
     if agents.contains(&Agent::Codex) {
         writeln!(
             out,
@@ -354,10 +445,13 @@ pub fn install(
     Ok(())
 }
 
+/// With `all`, the LaunchAgent goes too; `launchd` unloads it.
 pub fn uninstall(
     paths: &Paths,
     home: &Path,
     agents: &[Agent],
+    all: bool,
+    launchd: bool,
     input: &mut impl BufRead,
     out: &mut impl Write,
 ) -> Result<()> {
@@ -388,22 +482,33 @@ pub fn uninstall(
             });
         }
     }
-    apply(paths, changes, &record, input, out)
+    let service = launch_agent(home);
+    if all && let Some(old) = read(&service)? {
+        changes.push(Change {
+            path: service,
+            old: Some(old),
+            new: None,
+        });
+    }
+    if apply(paths, changes, &record, input, out)? && all && launchd {
+        launchctl(home, false, out)?;
+    }
+    Ok(())
 }
 
 /// Shows the changes, asks once, then backs up and writes each file and
-/// the record.
+/// the record. Returns whether anything was written.
 fn apply(
     paths: &Paths,
     changes: Vec<Change>,
     record: &Record,
     input: &mut impl BufRead,
     out: &mut impl Write,
-) -> Result<()> {
+) -> Result<bool> {
     let changes: Vec<Change> = changes.into_iter().filter(|c| c.old != c.new).collect();
     if changes.is_empty() {
         writeln!(out, "Nothing to change.")?;
-        return Ok(());
+        return Ok(false);
     }
     for c in &changes {
         out.write_all(
@@ -415,16 +520,12 @@ fn apply(
             .as_bytes(),
         )?;
         if c.new.is_none() {
-            writeln!(
-                out,
-                "{} is left empty and will be removed.",
-                c.path.display()
-            )?;
+            writeln!(out, "{} will be removed.", c.path.display())?;
         }
     }
     if !ask(input, out, "Write these changes?")? {
         writeln!(out, "Nothing written.")?;
-        return Ok(());
+        return Ok(false);
     }
     let backup = paths
         .home
@@ -455,7 +556,7 @@ fn apply(
     } else {
         writeln!(out, "Written.")?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Replaces `path` through a temporary file, keeping its permissions.
@@ -540,8 +641,27 @@ mod tests {
         assert_eq!(agents, [Agent::Claude], "only the agent set up here");
 
         // Move the rewriting hook, then confirm.
-        let shown = run(|i, o| install(&paths, &home, &agents, ats, i, o), "y\ny\n");
+        let shown = run(
+            |i, o| install(&paths, &home, &agents, ats, false, i, o),
+            "y\ny\n",
+        );
         assert!(shown.contains("+    \"Stop\": ["), "{shown}");
+        let service = launch_agent(&home);
+        let lint = std::process::Command::new("plutil")
+            .arg("-lint")
+            .arg(&service)
+            .output()
+            .unwrap();
+        assert!(
+            lint.status.success(),
+            "{}",
+            String::from_utf8_lossy(&lint.stdout)
+        );
+        assert!(
+            std::fs::read_to_string(&service)
+                .unwrap()
+                .contains("<string>/opt/ats</string>")
+        );
         let doc: Value =
             serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         let keys: Vec<&String> = doc.as_object().unwrap().keys().collect();
@@ -581,15 +701,22 @@ mod tests {
 
         // Installing again changes nothing.
         assert!(
-            run(|i, o| install(&paths, &home, &agents, ats, i, o), "")
+            run(|i, o| install(&paths, &home, &agents, ats, false, i, o), "")
                 .contains("Nothing to change.")
         );
 
-        run(|i, o| uninstall(&paths, &home, &agents, i, o), "y\n");
+        run(
+            |i, o| uninstall(&paths, &home, &agents, true, false, i, o),
+            "y\n",
+        );
         assert_eq!(
             std::fs::read_to_string(&settings).unwrap(),
             original,
             "byte for byte"
+        );
+        assert!(
+            !launch_agent(&home).exists(),
+            "the LaunchAgent goes with a full uninstall"
         );
         assert_eq!(
             std::fs::read_to_string(&instructions).unwrap(),
@@ -609,7 +736,17 @@ mod tests {
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(home.join(".claude/settings.json"), SETTINGS).unwrap();
         let shown = run(
-            |i, o| install(&paths, &home, &[Agent::Claude], Path::new("/opt/ats"), i, o),
+            |i, o| {
+                install(
+                    &paths,
+                    &home,
+                    &[Agent::Claude],
+                    Path::new("/opt/ats"),
+                    false,
+                    i,
+                    o,
+                )
+            },
             "n\nn\n",
         );
         assert!(shown.ends_with("Nothing written.\n"), "{shown}");
@@ -625,7 +762,7 @@ mod tests {
         let (_dir, paths, home) = setup();
         let ats = Path::new("/Applications/My Tools/ats");
         run(
-            |i, o| install(&paths, &home, &[Agent::Codex], ats, i, o),
+            |i, o| install(&paths, &home, &[Agent::Codex], ats, false, i, o),
             "y\n",
         );
         let hooks = std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
@@ -635,7 +772,7 @@ mod tests {
         );
         assert!(home.join(".codex/AGENTS.md").exists());
         run(
-            |i, o| uninstall(&paths, &home, &[Agent::Codex], i, o),
+            |i, o| uninstall(&paths, &home, &[Agent::Codex], true, false, i, o),
             "y\n",
         );
         assert!(
@@ -654,6 +791,7 @@ mod tests {
             &home,
             &[Agent::Claude],
             Path::new("/opt/ats"),
+            false,
             &mut "y\n".as_bytes(),
             &mut out,
         )
