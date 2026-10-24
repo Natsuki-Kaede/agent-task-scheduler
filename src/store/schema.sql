@@ -37,7 +37,8 @@ CREATE TABLE submissions (
     job_id              TEXT NOT NULL REFERENCES jobs(id),
     session_id          TEXT,               -- NULL for anonymous submissions
     canceled            INTEGER NOT NULL DEFAULT 0,
-    quiet               INTEGER NOT NULL DEFAULT 0, -- reminders leave it out
+    detached            INTEGER NOT NULL DEFAULT 0, -- Stop does not wait for it
+    quiet               INTEGER NOT NULL DEFAULT 0, -- its end is not reported
     created_at          TEXT NOT NULL
 );
 CREATE INDEX submissions_job ON submissions(job_id);

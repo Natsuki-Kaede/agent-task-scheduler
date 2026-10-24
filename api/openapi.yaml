@@ -269,8 +269,18 @@ paths:
 
   /v1/submissions/{id}/quiet:
     post:
-      summary: Leave a submission out of reminders
-      description: Set by `ats detach`, and by the CLI once the submission's result has reached the agent.
+      summary: Do not report a submission's end
+      description: Set by the CLI once the submission's result has reached the agent.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '204': { description: Recorded }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/submissions/{id}/detach:
+    post:
+      summary: Let the agent stop without waiting for a submission
+      description: The Stop reminder leaves it out; its end is still reported once.
       parameters:
         - { $ref: '#/components/parameters/Id' }
       responses:
@@ -279,7 +289,7 @@ paths:
 
   /v1/sessions/{id}/running:
     get:
-      summary: A session's submissions still running and not quiet, for the Stop reminder
+      summary: A session's submissions still running and not detached, for the Stop reminder
       parameters:
         - { $ref: '#/components/parameters/Id' }
       responses:
@@ -487,4 +497,5 @@ components:
         main_exit_code: { type: [integer, 'null'] }
         log_path: { type: [string, 'null'] }
         canceled: { type: boolean }
-        quiet: { type: boolean, description: Reminders leave it out }
+        detached: { type: boolean, description: The Stop reminder leaves it out }
+        quiet: { type: boolean, description: Its end is not reported }

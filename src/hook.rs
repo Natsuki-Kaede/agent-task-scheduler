@@ -151,7 +151,7 @@ async fn stop(paths: &Paths, input: &Value) -> Answer {
     Answer::Json(json!({
         "decision": "block",
         "reason": format!(
-            "ats: submissions from this session are still running. Wait for each with `ats wait <submission>`, or leave it running with `ats detach <submission>`:\n{}",
+            "ats: submissions from this session are still running. Wait for each with `ats wait <submission>`, or leave it running with `ats detach <submission>`; you are told when it ends:\n{}",
             lines.join("\n")
         ),
     }))

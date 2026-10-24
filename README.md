@@ -53,7 +53,7 @@ and exits with 75 while the command continues. Other exit codes from `ats` itsel
 | `ats status [<id>]` | Show jobs, or one submission or job |
 | `ats logs <id> [-f]` | Print or follow a job's output |
 | `ats why <id>` | Explain why a job is still waiting |
-| `ats cancel <id>` / `ats detach <id>` | Stop a submission, or leave it running without reminders |
+| `ats cancel <id>` / `ats detach <id>` | Stop a submission, or let the agent stop without waiting for it; the agent still hears when it ends |
 | `ats unblock <id>` | Run a job whose predecessor failed |
 
 Options of `ats run`: `--wait <duration>` (default 90s) or `--no-wait`; `--after <id,...>` to run after other jobs succeed; `--lock <path or name>` for a resource only one job may use at a time; `--hint mem=6G` when you know the command needs more memory than predicted; `--now` to skip the queue.

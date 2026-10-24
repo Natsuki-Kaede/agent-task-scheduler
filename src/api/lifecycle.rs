@@ -27,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/submissions/{id}/wait", post(wait))
         .route("/v1/submissions/{id}/cancel", post(cancel))
         .route("/v1/submissions/{id}/quiet", post(quiet))
+        .route("/v1/submissions/{id}/detach", post(detach))
         .route("/v1/sessions/{id}/running", get(running))
         .route("/v1/sessions/{id}/ended", post(ended))
         .route("/v1/jobs/{id}/why", get(why))
@@ -249,6 +250,12 @@ async fn wait(
 
 async fn cancel(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
     s.store().cancel_submission(&id)?;
+    s.notify();
+    ok()
+}
+
+async fn detach(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    s.store().detach_submission(&id)?;
     s.notify();
     ok()
 }

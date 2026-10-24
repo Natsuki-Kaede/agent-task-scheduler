@@ -26,7 +26,7 @@ const INSTRUCTIONS: &str = "\
 Shell commands with real load run through `ats`, which starts them when the machine has memory for them, so parallel sessions do not slow each other down. A hook rewrites them into `ats run`; you do not need to call it yourself.
 
 - When the command finishes within 90 seconds, its output and exit code come back unchanged.
-- Exit code 75 with an `[ats] submission ...` line: the command is still running in the background. Get the result with `ats wait <submission>` (up to 90 seconds per call), follow its output with `ats logs <submission> -f`, or leave it running with `ats detach <submission>`.
+- Exit code 75 with an `[ats] submission ...` line: the command is still running in the background. Get the result with `ats wait <submission>` (up to 90 seconds per call), follow its output with `ats logs <submission> -f`, or leave it running with `ats detach <submission>`; you are told at your next turn when it ends.
 - Exit code 76: a predecessor given with `--after` failed. 77: ats rejected the submission. 78: ats itself failed.
 - `ats why <submission>` explains a wait. Use `ats run --now` only when the user asks to run something immediately.";
 

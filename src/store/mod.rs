@@ -17,7 +17,7 @@ mod sched;
 pub use sched::{HELD, PRE_LEASE};
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// How long ended jobs, their records and logs are kept (design 11).
 pub const KEEP: std::time::Duration = std::time::Duration::from_secs(90 * 24 * 3600);
@@ -114,8 +114,10 @@ pub struct SubmissionRow {
     pub main_exit_code: Option<i64>,
     pub log_path: Option<String>,
     pub canceled: bool,
-    /// Reminders leave it out: detached, its result already reached the
-    /// agent, or it was reported once (design 6.2).
+    /// `ats detach`: the `Stop` reminder does not hold the agent for it.
+    pub detached: bool,
+    /// Its end is not reported: the result already reached the agent, or
+    /// it was reported once (design 6.2).
     pub quiet: bool,
 }
 
@@ -212,6 +214,13 @@ impl Store {
                 conn.execute_batch(SCHEMA)?;
                 conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
+            // Version 1 had no detach flag apart from quiet.
+            1 => {
+                conn.execute_batch(
+                    "ALTER TABLE submissions ADD COLUMN detached INTEGER NOT NULL DEFAULT 0;
+                     PRAGMA user_version = 2;",
+                )?;
+            }
             SCHEMA_VERSION => {}
             v => bail!("database schema version {v} is newer than this ats ({SCHEMA_VERSION})"),
         }
@@ -307,7 +316,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT s.id, s.job_id, j.state, s.session_id, j.exit_code, j.main_exit_code, j.log_path,
-                        s.canceled, s.quiet
+                        s.canceled, s.detached, s.quiet
                  FROM submissions s JOIN jobs j ON j.id = s.job_id WHERE s.id = ?1",
                 params![id],
                 |r| {
@@ -320,7 +329,8 @@ impl Store {
                         main_exit_code: r.get(5)?,
                         log_path: r.get(6)?,
                         canceled: r.get(7)?,
-                        quiet: r.get(8)?,
+                        detached: r.get(8)?,
+                        quiet: r.get(9)?,
                     })
                 },
             )
@@ -546,12 +556,22 @@ impl Store {
         self.update_submission(id, "quiet = 1")
     }
 
+    pub fn detach_submission(&mut self, id: &str) -> Result<String> {
+        self.update_submission(id, "detached = 1")
+    }
+
+    /// Running submissions the agent did not detach, or ended ones not yet
+    /// reported.
     fn reminders(conn: &Connection, session: &str, ended: bool) -> Result<Vec<Reminder>> {
+        let (open, state) = if ended {
+            ("s.quiet = 0", "")
+        } else {
+            ("s.detached = 0", "NOT")
+        };
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT s.id, s.job_id, j.state, j.exit_code, j.command FROM submissions s JOIN jobs j ON j.id = s.job_id
-             WHERE s.session_id = ?1 AND s.quiet = 0 AND s.canceled = 0 AND j.state {} IN ({})
+             WHERE s.session_id = ?1 AND {open} AND s.canceled = 0 AND j.state {state} IN ({})
              ORDER BY s.created_at",
-            if ended { "" } else { "NOT" },
             sched::in_list(TERMINAL)
         ))?;
         let rows = stmt.query_map(params![session], |r| {
@@ -566,7 +586,7 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// A session's submissions that have not ended and are not quiet.
+    /// A session's submissions that have not ended and are not detached.
     pub fn running_reminders(&self, session: &str) -> Result<Vec<Reminder>> {
         Self::reminders(&self.conn, session, false)
     }
@@ -700,13 +720,15 @@ mod tests {
             new.session_id = session.map(str::to_string);
             store.create_submission(&new).unwrap()
         };
-        let (running, ended, delivered, canceled) = (
+        let (running, ended, delivered, canceled, detached) = (
+            submit(Some("s")),
             submit(Some("s")),
             submit(Some("s")),
             submit(Some("s")),
             submit(Some("s")),
         );
         submit(Some("another session"));
+        store.detach_submission(&detached.submission).unwrap();
         store.finish(&ended.job, "completed", Some(0)).unwrap();
         store.finish(&delivered.job, "completed", Some(1)).unwrap();
         store.quiet_submission(&delivered.submission).unwrap();
@@ -723,6 +745,12 @@ mod tests {
         assert!(
             store.take_ended_reminders("s").unwrap().is_empty(),
             "reported once"
+        );
+        // A detached submission does not hold Stop, but its end is reported.
+        store.finish(&detached.job, "completed", Some(0)).unwrap();
+        assert_eq!(
+            ids(store.take_ended_reminders("s").unwrap()),
+            std::slice::from_ref(&detached.submission)
         );
         assert!(store.submission(&ended.submission).unwrap().unwrap().quiet);
     }
@@ -768,6 +796,25 @@ mod tests {
         store.create_submission(&sample("a")).unwrap();
         assert_eq!(store.list_jobs(&["queued".into()], 10).unwrap().len(), 1);
         assert!(store.list_jobs(&["running".into()], 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upgrades_a_version_1_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ats.db");
+        let old = SCHEMA.replace(
+            "    detached            INTEGER NOT NULL DEFAULT 0, -- Stop does not wait for it\n",
+            "",
+        );
+        assert_ne!(old, SCHEMA);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&old).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        drop(conn);
+        let mut store = Store::open(&path).unwrap();
+        let id = store.create_submission(&sample("make")).unwrap().submission;
+        store.detach_submission(&id).unwrap();
+        assert!(store.submission(&id).unwrap().unwrap().detached);
     }
 
     #[test]

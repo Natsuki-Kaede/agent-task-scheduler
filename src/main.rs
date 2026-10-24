@@ -101,8 +101,8 @@ enum Command {
     Unblock { id: String },
     /// Cancel a submission; the job stops when no other submission wants it.
     Cancel { submission: String },
-    /// Leave a submission running in the background; reminders stop
-    /// naming it.
+    /// Leave a submission running in the background: the agent may stop
+    /// without waiting for it, and still hears when it ends.
     Detach { submission: String },
     /// Add ats's hooks and instructions to Claude Code and Codex and start
     /// the daemon at login, after showing the changes and asking.
@@ -196,7 +196,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Why { id } => cli::why(&paths, &id).await,
         Command::Unblock { id } => cli::unblock(&paths, &id).await,
         Command::Cancel { submission } => cli::mark(&paths, &submission, "cancel").await,
-        Command::Detach { submission } => cli::mark(&paths, &submission, "quiet").await,
+        Command::Detach { submission } => cli::mark(&paths, &submission, "detach").await,
         Command::Status { state, json, .. } => {
             if let Some(home) = dirs::home_dir() {
                 for agent in install::agents(&home, &[]) {
