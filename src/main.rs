@@ -198,6 +198,15 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Cancel { submission } => cli::mark(&paths, &submission, "cancel").await,
         Command::Detach { submission } => cli::mark(&paths, &submission, "quiet").await,
         Command::Status { state, json, .. } => {
+            if let Some(home) = dirs::home_dir() {
+                for agent in install::agents(&home, &[]) {
+                    for command in install::other_rewriters(&home, agent) {
+                        eprintln!(
+                            "[ats] `{command}` also rewrites shell commands next to ats's hook; run `ats install` so ats runs it first."
+                        );
+                    }
+                }
+            }
             let path = match state {
                 Some(s) => format!("/v1/jobs?state={s}"),
                 None => "/v1/jobs".to_string(),

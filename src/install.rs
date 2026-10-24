@@ -338,6 +338,47 @@ fn launchctl(home: &Path, load: bool, out: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
+/// Hooks besides ats's that rewrite shell commands for `agent`: ones added
+/// after `ats install` moved the others into its chain.
+pub fn other_rewriters(home: &Path, agent: Agent) -> Vec<String> {
+    let path = files(home, agent).0;
+    let Some(doc) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return Vec::new();
+    };
+    let has_ats = candidates(&doc).iter().any(|c| is_ats(&c.hook, agent));
+    if !has_ats {
+        return Vec::new();
+    }
+    candidates(&doc)
+        .into_iter()
+        .filter(|c| !is_ats(&c.hook, agent))
+        .filter_map(|c| c.hook["command"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Claude Code checks permission rules against the rewritten command, so
+/// rules that allow particular shell commands stop matching them. Modes
+/// that ask for no approval are not affected.
+fn shell_allow_rules(doc: &Value) -> Vec<String> {
+    let mode = doc["permissions"]["defaultMode"]
+        .as_str()
+        .unwrap_or("default");
+    if matches!(mode, "auto" | "bypassPermissions") {
+        return Vec::new();
+    }
+    doc["permissions"]["allow"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|r| r.starts_with("Bash(") && !r.starts_with("Bash(ats"))
+        .map(str::to_string)
+        .collect()
+}
+
 /// One file to write; `new` is `None` to remove the file.
 struct Change {
     path: PathBuf,
@@ -389,6 +430,7 @@ pub fn install(
 ) -> Result<()> {
     let mut record = Record::load(paths)?;
     let mut changes = Vec::new();
+    let mut notes = Vec::new();
     for &agent in agents {
         let (hooks_file, instructions) = files(home, agent);
         let old = read(&hooks_file)?;
@@ -407,6 +449,11 @@ pub fn install(
         }
         move_out(&mut doc, &chosen);
         add_ats(&mut doc, agent, ats);
+        if agent == Agent::Claude {
+            notes.extend(shell_allow_rules(&doc).into_iter().map(|r| format!(
+                "Claude Code checks permission rules against the rewritten command `ats run ... --sh '...'`, so the rule {r} no longer matches what it allowed; those commands will ask for permission."
+            )));
+        }
         changes.push(Change {
             path: hooks_file,
             new: Some(json_text(&doc)),
@@ -430,17 +477,15 @@ pub fn install(
         new: Some(plist(paths, ats)),
         path: service,
     });
-    if !apply(paths, changes, &record, input, out)? {
-        return Ok(());
-    }
-    if launchd {
-        launchctl(home, true, out)?;
-    }
     if agents.contains(&Agent::Codex) {
-        writeln!(
-            out,
-            "Codex asks you to trust the changed hooks the next time it starts."
-        )?;
+        notes.push("Codex queues commands through ats only in sessions that need no approval (approval policy \"never\", such as full access); in other sessions they run directly. Codex asks you to trust the changed hooks the next time it starts.".into());
+    }
+    // Shown with the diffs, before the question.
+    for note in &notes {
+        writeln!(out, "Note: {note}")?;
+    }
+    if apply(paths, changes, &record, input, out)? && launchd {
+        launchctl(home, true, out)?;
     }
     Ok(())
 }
@@ -728,6 +773,14 @@ mod tests {
                 .chain(Agent::Claude)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn names_shell_allow_rules_that_stop_matching() {
+        let doc = |mode: &str| json!({"permissions": {"defaultMode": mode, "allow": ["Bash(cargo build:*)", "Bash(ats status)", "Read"]}});
+        assert_eq!(shell_allow_rules(&doc("default")), ["Bash(cargo build:*)"]);
+        assert!(shell_allow_rules(&doc("auto")).is_empty());
+        assert!(shell_allow_rules(&json!({})).is_empty());
     }
 
     #[test]
