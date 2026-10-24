@@ -1,0 +1,21 @@
+src/main.rs
+  s_f3c1b911a8127c::t_a4c757fe97c2f3 146-152
+src/install.rs
+  s_f3c1b911a8127c::t_a4c757fe97c2f3 311-322,325-341,464-465,467-468,479,543
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3c18f11e806140cd62714a4ea0a10f943d9d6e34",
+  "prompts": {},
+  "sessions": {
+    "s_f3c1b911a8127c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ebdee9d0-bc28-495b-8688-67161f172369",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
