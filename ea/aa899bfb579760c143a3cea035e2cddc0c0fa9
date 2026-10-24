@@ -1,0 +1,19 @@
+src/hook.rs
+  s_bb9527a6cd4695::t_4c3d54bc00d1cc 351-352,356-360,530-534
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eaaa899bfb579760c143a3cea035e2cddc0c0fa9",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
