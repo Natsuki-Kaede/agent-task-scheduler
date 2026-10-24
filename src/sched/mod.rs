@@ -227,7 +227,10 @@ pub fn decide(r: &Round) -> Vec<(String, Verdict)> {
                     });
                 }
             }
-            if w.reserved as i64 <= free {
+            // With no managed job holding memory, waiting cannot free any
+            // that ats controls: the first job always starts (design 10.1).
+            let idle = r.held.is_empty() && admitted_ends.is_empty();
+            if w.reserved as i64 <= free || idle {
                 return Verdict::Admit;
             }
             if head.is_none() {

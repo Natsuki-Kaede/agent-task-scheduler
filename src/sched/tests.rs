@@ -94,7 +94,8 @@ fn admits_by_memory_in_order() {
             reason: Reason::Settling
         }
     );
-    let out = run(&cap(14 * G), &[], &[job("a", 30.0, 3 * G)]);
+    // A managed job is running, so memory it frees can let this one in.
+    let out = run(&cap(14 * G), &[held("h", G, G)], &[job("a", 30.0, 3 * G)]);
     assert_eq!(
         verdict(&out, "a"),
         &Verdict::Wait {
@@ -104,6 +105,37 @@ fn admits_by_memory_in_order() {
             }
         }
     );
+}
+
+#[test]
+fn the_first_job_starts_when_nothing_managed_runs() {
+    // Other programs leave 2G; the 4G job starts anyway, the next waits.
+    let waiting = [job("a", 30.0, 4 * G), job("b", 20.0, G)];
+    let out = run(&cap(14 * G), &[], &waiting);
+    assert_eq!(admitted(&out), ["a"]);
+    assert!(matches!(verdict(&out, "b"), Verdict::Wait { .. }));
+    // A managed job holding memory can free it: wait for that.
+    let out = run(&cap(14 * G), &[held("h", G, G)], &waiting[..1]);
+    assert!(matches!(
+        verdict(&out, "a"),
+        Verdict::Wait {
+            reason: Reason::Memory { .. }
+        }
+    ));
+    // Pressure and the machine's size still hold.
+    let mut r = round(&cap(14 * G), &[], &waiting[..1]);
+    r.pressure = true;
+    assert_eq!(
+        verdict(&decide(&r), "a"),
+        &Verdict::Wait {
+            reason: Reason::Pressure
+        }
+    );
+    let out = run(&cap(14 * G), &[], &[job("huge", 1.0, 17 * G)]);
+    assert!(matches!(
+        verdict(&out, "huge"),
+        Verdict::CapacityInsufficient { .. }
+    ));
 }
 
 #[test]
@@ -296,7 +328,7 @@ fn backfill_never_takes_the_heads_lock() {
     let mut sneaky = job("sneaky", 40.0, 0);
     sneaky.seconds = Some(1.0);
     sneaky.locks = vec![path("/repo/target")];
-    let out = run(&cap(8 * G), &[], &[head, sneaky]);
+    let out = run(&cap(8 * G), &[held("h", G, G)], &[head, sneaky]);
     assert_eq!(
         verdict(&out, "sneaky"),
         &Verdict::Wait {
