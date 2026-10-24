@@ -1,0 +1,38 @@
+src/install.rs
+  s_bb9527a6cd4695::t_23edadf68193aa 29
+api/openapi.yaml
+  s_bb9527a6cd4695::t_23edadf68193aa 272-283,292,500-501
+src/hook.rs
+  s_bb9527a6cd4695::t_23edadf68193aa 154
+src/store/schema.sql
+  s_bb9527a6cd4695::t_23edadf68193aa 40-41
+src/store/mod.rs
+  s_bb9527a6cd4695::t_ae5e14648ac3d6 731
+  s_bb9527a6cd4695::t_23edadf68193aa 117-120,319,332-333,559-564,573,589,723-724,749-753,818
+  s_bb9527a6cd4695::t_a65f80dcdeb149 566-570
+  s_bb9527a6cd4695::t_4481c4e51406ca 20,217-223,754,801-817
+  s_bb9527a6cd4695::t_fa83c24a8e1aef 819
+README.md
+  s_bb9527a6cd4695::t_23edadf68193aa 56
+src/api/lifecycle.rs
+  s_bb9527a6cd4695::t_23edadf68193aa 30,257-258
+  s_bb9527a6cd4695::t_2a168e992ab354 259-262
+src/main.rs
+  s_bb9527a6cd4695::t_23edadf68193aa 104-105,199
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ae6febd900fad30bcc7dab86e28b9e837a517aca",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
