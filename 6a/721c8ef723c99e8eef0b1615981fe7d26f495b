@@ -1,0 +1,27 @@
+scripts/release.sh
+  s_bb9527a6cd4695::t_4b5497e856fdc8 1-21
+LICENSE
+  s_bb9527a6cd4695::t_4a799fd7788ba8 1-674
+README.md
+  s_bb9527a6cd4695::t_cef207a9b89881 1-76
+packaging/homebrew/ats.rb
+  s_bb9527a6cd4695::t_4b5497e856fdc8 1-27
+.gitignore
+  s_bb9527a6cd4695::t_4b5497e856fdc8 6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6a721c8ef723c99e8eef0b1615981fe7d26f495b",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
