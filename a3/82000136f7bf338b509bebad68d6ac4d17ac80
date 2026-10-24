@@ -1,0 +1,25 @@
+src/install.rs
+  s_bb9527a6cd4695::t_058d0c9fca79b1 645,704,709,765,775
+  s_bb9527a6cd4695::t_77d8a6ea5a633a 649-664,717-719
+  s_bb9527a6cd4695::t_accd7cc66492a4 1-3,19-20,266-341,380,386,427-438,448,453-454,485-496,500,507,511,523,528,559,644,646-647,708,710-711,720
+  s_bb9527a6cd4695::t_ddbf79bcfd2f1c 739-749,794
+src/main.rs
+  s_bb9527a6cd4695::t_406f4b222de9c5 226,239-240
+  s_bb9527a6cd4695::t_accd7cc66492a4 107-108,115
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a382000136f7bf338b509bebad68d6ac4d17ac80",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
