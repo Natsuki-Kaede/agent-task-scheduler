@@ -34,16 +34,18 @@ pub fn parse_hint(text: &str) -> Result<u64, String> {
 pub struct Defaults {
     pub light: u64,
     pub medium: u64,
-    /// For unknown and heavy commands: 15% of total memory (design 8.3).
+    /// For unknown and heavy commands (design 8.3). A running job's
+    /// reservation falls to what it is measured using, so a high guess is
+    /// held only briefly.
     pub conservative: u64,
 }
 
-impl Defaults {
-    pub fn for_machine(mem_total: u64) -> Self {
+impl Default for Defaults {
+    fn default() -> Self {
         Defaults {
             light: 64 << 20,
             medium: 512 << 20,
-            conservative: mem_total * 15 / 100,
+            conservative: 1 << 30,
         }
     }
 }
@@ -255,13 +257,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let analysis = Recognizer::new(&profiles, &[]).shell(src, dir.path());
         let hint = (!hint.is_empty()).then(|| parse_hint(hint).unwrap());
-        predict(
-            &analysis,
-            &profiles,
-            &Defaults::for_machine(16 * G),
-            hint,
-            &history,
-        )
+        predict(&analysis, &profiles, &Defaults::default(), hint, &history)
     }
 
     fn predict_line(src: &str, hint: &str) -> Prediction {
@@ -296,12 +292,12 @@ mod tests {
         );
         assert_eq!(
             predict_line("./build.sh", "").mem,
-            16 * G * 15 / 100,
+            G,
             "unknown: conservative"
         );
         assert_eq!(
             predict_line("for x in a; do make; done", "").mem,
-            16 * G * 15 / 100,
+            G,
             "unclear"
         );
         assert_eq!(predict_line("ls", "").mem, 64 << 20);

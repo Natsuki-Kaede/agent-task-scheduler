@@ -13,19 +13,6 @@ use crate::sched::locks;
 use crate::sched::predict::{Defaults, Lookup, Stats, line_key, parse_hint, predict};
 use crate::store::{Entry, Plan, Store};
 
-/// This machine's memory, for default predictions.
-fn mem_total(s: &AppState) -> u64 {
-    let measured = s
-        .measurements
-        .lock()
-        .expect("measurements lock")
-        .system
-        .clone();
-    measured
-        .or_else(crate::sample::system)
-        .map_or(8 << 30, |sys| sys.mem_total)
-}
-
 /// `command` is the stored (redacted) form, which history is matched on.
 pub fn plan(s: &AppState, store: &Store, req: &SubmitRequest, command: &str) -> ApiResult<Plan> {
     let cwd = Path::new(&req.cwd);
@@ -50,13 +37,7 @@ pub fn plan(s: &AppState, store: &Store, req: &SubmitRequest, command: &str) -> 
             Stats::default()
         })
     };
-    let prediction = predict(
-        &analysis,
-        &s.profiles,
-        &Defaults::for_machine(mem_total(s)),
-        hint,
-        &history,
-    );
+    let prediction = predict(&analysis, &s.profiles, &Defaults::default(), hint, &history);
     let locks = locks::for_line(&analysis, cwd, &s.profiles, &req.lock);
 
     let mut after = Vec::new();

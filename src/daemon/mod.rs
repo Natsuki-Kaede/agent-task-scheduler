@@ -24,6 +24,11 @@ const RECONNECT_GRACE: Duration = Duration::from_secs(10);
 const SWEEP_EVERY: Duration = Duration::from_secs(1);
 const SAMPLE_EVERY: Duration = Duration::from_secs(1);
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
+/// A job running this long has shown its memory; its reservation follows
+/// the measurement down (design 9).
+const SETTLE_AFTER: Duration = Duration::from_secs(30);
+/// Reservations are checked against measurements every this many samples.
+const SETTLE_EVERY: u64 = 5;
 
 /// Runs the daemon until `shutdown` completes.
 pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
@@ -112,6 +117,7 @@ fn sample_loop(state: &AppState) {
     let mut sampler = Sampler::default();
     let mut response = pressure::Response::default();
     let mut recorded: HashMap<String, u64> = HashMap::new();
+    let mut ticks = 0u64;
     while !state.stopping() {
         let jobs = state.store().active_jobs().unwrap_or_else(|e| {
             tracing::error!("listing jobs to sample: {e:#}");
@@ -145,6 +151,20 @@ fn sample_loop(state: &AppState) {
             }
         }
         recorded.retain(|job, _| snapshot.jobs.contains_key(job));
+        if ticks.is_multiple_of(SETTLE_EVERY) {
+            let before =
+                humantime::format_rfc3339_millis(std::time::SystemTime::now() - SETTLE_AFTER)
+                    .to_string();
+            match state.store().settle_reservations(&before) {
+                Ok(0) => {}
+                Ok(n) => {
+                    tracing::info!(jobs = n, "reservations lowered to measured use");
+                    state.notify();
+                }
+                Err(e) => tracing::error!("settling reservations: {e:#}"),
+            }
+        }
+        ticks += 1;
         response.update(state, &snapshot);
         *state.measurements.lock().expect("measurements lock") = snapshot;
         std::thread::sleep(SAMPLE_EVERY);

@@ -488,6 +488,18 @@ impl Store {
         Ok(())
     }
 
+    /// Lowers the reservation of a job that started before `before` (RFC
+    /// 3339) to its measured peak × 1.3 when that is less (design 9), so a
+    /// prediction that was too high stops holding memory back.
+    pub fn settle_reservations(&mut self, before: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE jobs SET reserved_private = CAST(peak_private * 1.3 AS INTEGER)
+             WHERE state IN ('running', 'awaiting_takeover') AND started_at < ?1
+               AND peak_private IS NOT NULL AND peak_private * 1.3 < reserved_private",
+            params![before],
+        )?)
+    }
+
     /// The largest resident size an executor reports at the end. It also
     /// counts shared and file pages, so it only fills in for a job too short
     /// to be sampled, as an upper bound (design 8.3).
@@ -788,6 +800,31 @@ mod tests {
         for j in [&recent, &awaited, &waiting] {
             assert!(store.job(j).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn reservations_fall_to_measurements_after_a_while() {
+        let mut store = Store::open_in_memory().unwrap();
+        let job = store.create_submission(&sample("make")).unwrap().job;
+        store.set_executor(&job, 1, "t").unwrap();
+        store.admit(&job, 1000, 1).unwrap();
+        store.set_started(&job, "/l", None).unwrap();
+        store.record_peaks(&[(job.clone(), 100)]).unwrap();
+        let reserved = |s: &Store| s.held_jobs().unwrap()[0].reserved_private;
+        assert_eq!(
+            store
+                .settle_reservations("2000-01-01T00:00:00.000Z")
+                .unwrap(),
+            0,
+            "not long enough"
+        );
+        assert_eq!(reserved(&store), 1000);
+        store
+            .settle_reservations("2999-01-01T00:00:00.000Z")
+            .unwrap();
+        assert_eq!(reserved(&store), 130);
+        store.record_peaks(&[(job.clone(), 400)]).unwrap();
+        assert_eq!(reserved(&store), 400, "growth raises it again");
     }
 
     #[test]
