@@ -1,0 +1,27 @@
+tests/recovery.rs
+  s_bb9527a6cd4695::t_4684e7dca5a62b 26-27,36-37
+tests/hook.rs
+  s_bb9527a6cd4695::t_4684e7dca5a62b 10-11,130-139,175-179,181-185
+profiles/builtin.toml
+  s_bb9527a6cd4695::t_497743b03ec03a 21-27
+src/main.rs
+  s_bb9527a6cd4695::t_58ef804d67442f 161-162
+src/recognize/tests.rs
+  s_bb9527a6cd4695::t_b9718eea6bf723 243-245
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6121172c46cf477f453f54a4e711190a82331c68",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
