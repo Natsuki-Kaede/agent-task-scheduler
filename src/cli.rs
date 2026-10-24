@@ -298,15 +298,23 @@ async fn blocked(paths: &Paths, sub: &Value) -> Result<ExitCode> {
     Ok(ExitCode::from(EXIT_BLOCKED))
 }
 
-/// `ats wait`: waits for the job's terminal state (design 5.3).
+/// `ats wait`: waits for the job's terminal state and returns the
+/// command's output and exit code (design 5.3, 5.4).
 pub async fn wait(paths: &Paths, submission: &str, wait: Option<Duration>) -> Result<ExitCode> {
     let (reached, sub) = wait_for(paths, submission, "terminal", wait).await?;
     if sub["job_state"] == "blocked" {
         return blocked(paths, &sub).await;
     }
     if reached {
+        // The command's own output, as `ats run` would have returned it,
+        // then the job's end state.
+        print_output(&sub)?;
+        eprintln!("{}", terminal_line(&sub));
         delivered(paths, &sub).await;
-        return Ok(report_terminal(&sub));
+        return Ok(match sub["exit_code"].as_i64() {
+            Some(code) => exit_code(code),
+            None => ExitCode::from(1),
+        });
     }
     eprintln!("{}", status_line(&sub));
     Ok(ExitCode::from(EXIT_DETACHED))

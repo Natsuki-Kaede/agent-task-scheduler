@@ -174,6 +174,47 @@ fn reminds_the_session_of_its_submissions() {
     assert!(prompt().is_null(), "reported once");
 }
 
+#[test]
+fn wait_returns_the_commands_output_and_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let _daemon = Daemon(
+        Command::new(env!("CARGO_BIN_EXE_ats"))
+            .arg("daemon")
+            .env("ATS_HOME", &home)
+            .env_remove("ATS_JOB_ID")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_until("daemon", || {
+        ats(&home, &["status"], "", &[]).status.success()
+    });
+    let out = ats(
+        &home,
+        &[
+            "run",
+            "--no-wait",
+            "--sh",
+            "sleep 1; echo out; echo err >&2; exit 3",
+        ],
+        "",
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(75));
+    let line = String::from_utf8_lossy(&out.stderr).to_string();
+    let submission = line.split_whitespace().nth(2).unwrap().to_string();
+    let out = ats(&home, &["wait", &submission], "", &[]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "out\n");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("err\n") && stderr.contains("is completed, exit code 3"),
+        "{stderr}"
+    );
+}
+
 /// Stops the daemon even when an assertion fails, so it does not outlive
 /// the test.
 struct Daemon(std::process::Child);
