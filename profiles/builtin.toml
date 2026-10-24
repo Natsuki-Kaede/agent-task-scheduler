@@ -19,6 +19,13 @@ class = "light"
 writes = "none"
 
 [[profile]]
+name = "version-or-help"
+program = ["cargo", "rustc", "rustup", "go", "node", "npm", "pnpm", "yarn", "bun", "deno", "python", "python3", "pip", "pip3", "uv", "git", "make", "gmake", "cmake", "ninja", "gradle", "mvn", "swift", "xcodebuild", "docker", "brew", "tsc", "jest", "pytest", "clang", "gcc", "java", "ats"]
+args_any = ["--version", "-V", "--help", "-h"]
+class = "light"
+writes = "none"
+
+[[profile]]
 name = "command-lookup"
 program = ["command"]
 args_any = ["-v", "-V"]

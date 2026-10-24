@@ -23,6 +23,8 @@ impl Home {
         Command::new(env!("CARGO_BIN_EXE_ats"))
             .args(args)
             .env("ATS_HOME", &self.path)
+            // Tests may themselves run inside an ats job.
+            .env_remove("ATS_JOB_ID")
             .output()
             .unwrap()
     }
@@ -31,6 +33,8 @@ impl Home {
         let child = Command::new(env!("CARGO_BIN_EXE_ats"))
             .arg("daemon")
             .env("ATS_HOME", &self.path)
+            .env_remove("ATS_JOB_ID")
+            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();

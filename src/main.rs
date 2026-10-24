@@ -158,6 +158,8 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Daemon => {
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
+                // The LaunchAgent sends stderr to a file.
+                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
                 .init();
             daemon::run(paths, daemon::shutdown_signal()).await?;
             Ok(ExitCode::SUCCESS)

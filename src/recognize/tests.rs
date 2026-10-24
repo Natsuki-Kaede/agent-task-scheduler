@@ -240,6 +240,9 @@ fn interactive_commands() {
         ("tail -f app.log", true, true),
         ("git rebase -i HEAD~3", true, false),
         ("git rebase main", false, false),
+        ("cargo --version", false, true),
+        ("python3 -V", false, true),
+        ("cargo build --help", false, false),
     ] {
         let a = r.shell(src, dir.path());
         assert_eq!((a.interactive, a.light), (interactive, light), "{src}");

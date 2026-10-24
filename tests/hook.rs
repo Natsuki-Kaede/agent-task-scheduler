@@ -7,6 +7,8 @@ fn ats(home: &std::path::Path, args: &[&str], stdin: &str, env: &[(&str, &str)])
     let mut child = Command::new(env!("CARGO_BIN_EXE_ats"))
         .args(args)
         .env("ATS_HOME", home)
+        // Tests may themselves run inside an ats job.
+        .env_remove("ATS_JOB_ID")
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -125,12 +127,16 @@ fn reminds_the_session_of_its_submissions() {
     // Without a daemon, every reminder lets the agent through.
     assert!(stop(false).is_null() && prompt().is_null());
 
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_ats"))
-        .arg("daemon")
-        .env("ATS_HOME", &home)
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let _daemon = Daemon(
+        Command::new(env!("CARGO_BIN_EXE_ats"))
+            .arg("daemon")
+            .env("ATS_HOME", &home)
+            .env_remove("ATS_JOB_ID")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     wait_until("daemon", || {
         ats(&home, &["status"], "", &[]).status.success()
     });
@@ -166,7 +172,15 @@ fn reminds_the_session_of_its_submissions() {
         "{context}"
     );
     assert!(prompt().is_null(), "reported once");
+}
 
-    daemon.kill().unwrap();
-    daemon.wait().unwrap();
+/// Stops the daemon even when an assertion fails, so it does not outlive
+/// the test.
+struct Daemon(std::process::Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
