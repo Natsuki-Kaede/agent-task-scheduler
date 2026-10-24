@@ -18,7 +18,7 @@ pub struct Paths {
     pub lock: PathBuf,
     pub logs: PathBuf,
     pub config: PathBuf,
-    /// What `ats install` changed, for the hook chain and `ats uninstall`.
+    /// Hooks earlier versions of `ats install` moved, which it puts back.
     pub installed: PathBuf,
     /// User tool profiles (design 8.2).
     pub profiles: PathBuf,

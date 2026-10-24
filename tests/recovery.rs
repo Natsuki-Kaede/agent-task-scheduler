@@ -103,7 +103,7 @@ fn log(home: &Home, job: &str) -> String {
 fn a_job_survives_a_daemon_crash_and_reports_after_the_restart() {
     let home = Home::new();
     let daemon = home.daemon();
-    let (sub, job) = submit(&home, "sleep 2; echo done");
+    let (sub, job) = submit(&home, "perl -e 'sleep 2'; echo done");
     wait_until("job start", Duration::from_secs(5), || {
         home.job(&job)["state"] == "running"
     });
@@ -133,7 +133,7 @@ fn a_job_survives_a_daemon_crash_and_reports_after_the_restart() {
 fn a_lost_executor_holds_the_job_until_its_processes_exit() {
     let home = Home::new();
     let _daemon = home.daemon();
-    let (_, job) = submit(&home, "sleep 3");
+    let (_, job) = submit(&home, "perl -e 'sleep 3'");
     wait_until("job start", Duration::from_secs(5), || {
         home.job(&job)["state"] == "running"
     });

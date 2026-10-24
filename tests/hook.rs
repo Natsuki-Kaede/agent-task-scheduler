@@ -1,4 +1,4 @@
-//! The hook and nested runs through the real binary (design 6.1, 6.3).
+//! Reminders and runs through the real binary (design 6.1–6.3).
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -25,52 +25,14 @@ fn ats(home: &std::path::Path, args: &[&str], stdin: &str, env: &[(&str, &str)])
 }
 
 #[test]
-fn rewrites_through_the_configured_chain() {
+fn runs_light_commands_directly() {
+    // No daemon is running: light commands never contact one.
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    // Another rewriting hook that prefixes every command with `wrap`,
-    // moved into ats's chain by `ats install`.
-    std::fs::write(
-        home.join("config.toml"),
-        "[recognize]\nwrappers = [\"wrap\"]\n",
-    )
-    .unwrap();
-    let wrap = r#"python3 -c 'import json,sys; c = json.load(sys.stdin)["tool_input"]["command"]; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {"command": "wrap " + c}}}))'"#;
-    let record = serde_json::json!({ "agents": { "claude": [
-        { "group": 0, "index": 0, "hook": { "type": "command", "command": wrap } }
-    ] } });
-    std::fs::write(home.join("installed.json"), record.to_string()).unwrap();
-    let input = |command: &str| {
-        serde_json::json!({
-            "session_id": "s1", "cwd": dir.path(), "hook_event_name": "PreToolUse",
-            "tool_name": "Bash", "tool_input": { "command": command },
-        })
-        .to_string()
-    };
-    let out = ats(
-        &home,
-        &["hook", "claude", "pre-tool-use"],
-        &input("cargo build"),
-        &[],
-    );
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-    let command = answer["hookSpecificOutput"]["updatedInput"]["command"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        command.ends_with(" run --session s1 --sh 'wrap cargo build'"),
-        "{command}"
-    );
-
-    // Codex has no chain configured: a light command is left alone.
-    let out = ats(&home, &["hook", "codex", "pre-tool-use"], &input("ls"), &[]);
-    assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+    let out = ats(dir.path(), &["run", "--sh", "echo light; exit 4"], "", &[]);
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "light\n");
+    let out = ats(dir.path(), &["run", "--", "ls", "/"], "", &[]);
+    assert!(out.status.success(), "{out:?}");
 }
 
 #[test]
@@ -140,14 +102,15 @@ fn reminds_the_session_of_its_submissions() {
     wait_until("daemon", || {
         ats(&home, &["status"], "", &[]).status.success()
     });
+    // The session comes from the agent's environment.
     let run = |args: &[&str]| {
-        let mut all = vec!["run", "--session", "s1"];
+        let mut all = vec!["run"];
         all.extend_from_slice(args);
-        ats(&home, &all, "", &[])
+        ats(&home, &all, "", &[("CLAUDE_CODE_SESSION_ID", "s1")])
     };
     // A result the agent already got is not mentioned; one left running is.
-    assert!(run(&["--sh", "echo done"]).status.success());
-    let out = run(&["--no-wait", "--sh", "sleep 2"]);
+    assert!(run(&["--sh", "perl -e 1; echo done"]).status.success());
+    let out = run(&["--no-wait", "--sh", "perl -e 'sleep 2'"]);
     assert_eq!(out.status.code(), Some(75));
     let line = String::from_utf8_lossy(&out.stderr).to_string();
     let submission = line.split_whitespace().nth(2).unwrap().to_string();
@@ -197,7 +160,7 @@ fn wait_returns_the_commands_output_and_exit_code() {
             "run",
             "--no-wait",
             "--sh",
-            "sleep 1; echo out; echo err >&2; exit 3",
+            "perl -e 'sleep 1'; echo out; echo err >&2; exit 3",
         ],
         "",
         &[],

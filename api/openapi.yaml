@@ -402,7 +402,7 @@ components:
         argv: { type: array, items: { type: string }, description: Required for entry argv }
         source: { type: string, description: Shell source, required for entry sh }
         cwd: { type: string }
-        session: { type: string, description: The agent session, from its hook }
+        session: { type: string, description: "The agent session, from the environment the agent sets" }
         launcher_pid: { type: integer, description: The submitting CLI, which starts the executor }
         launcher_start: { type: string, description: Start time of the submitting CLI }
         after: { type: array, items: { type: string }, description: Job or submission ids that must succeed first }

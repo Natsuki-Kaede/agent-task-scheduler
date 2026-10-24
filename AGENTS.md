@@ -9,8 +9,8 @@ Agent Task Scheduler (`ats`) queues resource-heavy commands from AI agents and a
 - `src/api/`: the HTTP/JSON API, served on a unix socket and through the request-file channel (`src/channel.rs`).
 - `src/client.rs`: how commands reach the daemon.
 - `src/executor/`: the per-job process that waits for its lease and runs the command.
-- `src/hook.rs`: the agent hooks: rewriting shell commands into `ats run`, and reminders.
-- `src/install.rs`: `ats install` and `ats uninstall` for the agents' hook configuration and instructions.
+- `src/hook.rs`: the agent hooks, which remind agents of their submissions.
+- `src/install.rs`: `ats install` and `ats uninstall` for the agents' instructions, reminder hooks and the LaunchAgent.
 - `src/recognize/`, `src/profile.rs`, `profiles/builtin.toml`: command recognition and tool profiles.
 - `src/sched/`: admission, prediction, locks and pressure as pure functions.
 - `src/sample/`: memory measurement.

@@ -1,15 +1,15 @@
 # Agent Task Scheduler (ats)
 
-When several AI agent sessions work on one Mac, each one builds, tests and runs models as if it had the machine to itself. Memory runs out, the system swaps, and everything slows down together until commands time out.
+Several AI agent sessions on one Mac can build, test and run models at the same time. Each session works as if it has the machine for itself. Then memory runs out, the system swaps, and all commands become slow until they time out.
 
-`ats` sits between the agents and the machine. Agent hooks hand each shell command with real load to `ats run`; a local daemon starts it when the machine has memory for it and tells it how many parallel jobs to use. The command runs in the agent's own environment, and its output and exit code come back unchanged.
+`ats` is a local queue for heavy shell commands. An agent sends a heavy command to `ats run`. A daemon starts the command when the machine has memory for it, and tells the command how many parallel jobs to use. The command runs in the environment of the agent. Its output and exit code come back unchanged.
 
-- **Admission by memory.** A command starts when its predicted peak memory fits the headroom left by the system and by jobs already running. CPU is left to the operating system; `ats` only sets each job's parallelism.
-- **Learns from use.** Each run records its measured memory peak and duration, and the next run of the same command is predicted from that history.
-- **Steps back under pressure.** When the system starts swapping, nothing new starts and running jobs move to background priority until it calms down. Jobs are never paused or killed.
-- **Light commands pass through.** `ls`, `git rev-parse`, editors and other interactive or quick commands run directly.
+- **Admission by memory.** A command starts when its predicted peak memory fits in the free memory. CPU stays with the operating system. `ats` only sets the parallelism of each job.
+- **Predictions from use.** Each run records its measured memory peak and duration. The next run of the same command uses these values.
+- **Less load under pressure.** When the system starts to swap, `ats` starts no new commands and gives running jobs background priority. It does not pause or stop jobs.
+- **The agent decides.** Instructions tell the model which commands to send to `ats`. Light commands run directly, so they cost nothing more.
 
-macOS on Apple Silicon. Claude Code and Codex are supported.
+`ats` runs on macOS with Apple Silicon. It supports Claude Code and Codex.
 
 ## Install
 
@@ -18,58 +18,61 @@ brew install natsuki-kaede/tap/ats
 ats install
 ```
 
-Or from source, with a Rust toolchain:
+To build from source, install a Rust toolchain. Then run these commands:
 
 ```sh
 cargo install --locked --git https://github.com/Natsuki-Kaede/agent-task-scheduler
 ats install
 ```
 
-`ats install` shows every change as a diff and asks before writing:
+`ats install` shows each change as a diff. It writes nothing before you agree:
 
-- hooks in `~/.claude/settings.json` and `~/.codex/hooks.json` that rewrite shell commands into `ats run` and remind the agent of commands still running;
-- a short section in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` that explains `ats` to the agent;
+- instructions for the model: `~/.claude/ats.md` with an `@ats.md` line in `~/.claude/CLAUDE.md`, and a section in `~/.codex/AGENTS.md`;
+- two reminder hooks in `~/.claude/settings.json` and `~/.codex/hooks.json`, which tell the agent about commands that still run or that ended;
 - a LaunchAgent that starts the daemon at login.
 
-Other hooks that rewrite shell commands can run inside `ats`'s hook; `ats install` asks about each one. Codex asks you to trust the changed hooks the next time it starts.
+Codex asks you to trust the changed hooks when it starts the next time.
 
-`ats uninstall` removes all of it and puts back what it moved, after the same diff and question.
+`ats uninstall` removes all of these items after the same diff and question.
 
 ## Use
 
-The agent keeps running commands as before. A command that finishes within 90 seconds returns as usual. One that takes longer prints a line such as
+The model writes a heavy command as `ats run -- cargo build` or `ats run --sh 'npm run build'`. When the command ends in 90 seconds or less, it gives its output as usual. When it runs longer, `ats` prints a line such as
 
 ```
 [ats] submission s_x job j_y is running; log: ...; check with: ats wait s_x
 ```
 
-and exits with 75 while the command continues. Other exit codes from `ats` itself: 76 when a predecessor given with `--after` failed, 77 when the submission was rejected, 78 when `ats` failed.
+and exits with code 75. The command continues in the background. Other exit codes of `ats`: 76 when a predecessor given with `--after` failed, 77 when `ats` did not accept the submission, 78 when `ats` failed.
 
 | Command | |
 |---|---|
-| `ats run [options] -- <program> [args...]` | Run a program when admitted |
+| `ats run [options] -- <program> [args...]` | Run a program when the machine has memory for it |
 | `ats run [options] --sh '<shell source>'` | Run shell source with your shell |
-| `ats wait <id>` | Wait for a submission to end and report it |
+| `ats wait <id>` | Wait for a submission to end, then give its output and exit code |
 | `ats status [<id>]` | Show jobs, or one submission or job |
-| `ats logs <id> [-f]` | Print or follow a job's output |
-| `ats why <id>` | Explain why a job is still waiting |
-| `ats cancel <id>` / `ats detach <id>` | Stop a submission, or let the agent stop without waiting for it; the agent still hears when it ends |
+| `ats logs <id> [-f]` | Show the output of a job, or follow it |
+| `ats why <id>` | Show why a job waits |
+| `ats cancel <id>` | Stop a submission |
+| `ats detach <id>` | Let the agent stop without a wait for the submission; the agent is told when it ends |
 | `ats unblock <id>` | Run a job whose predecessor failed |
 
-Options of `ats run`: `--wait <duration>` (default 90s) or `--no-wait`; `--after <id,...>` to run after other jobs succeed; `--lock <path or name>` for a resource only one job may use at a time; `--hint mem=6G` when you know the command needs more memory than predicted; `--now` to skip the queue.
+Options of `ats run`: `--wait <duration>` (default 90s) or `--no-wait`; `--after <id,...>` to run after other jobs succeed; `--lock <path or name>` for a resource that only one job can use at a time; `--hint mem=6G` when the command needs more memory than the prediction; `--now` to start without the queue.
+
+In Claude Code permission modes that ask before shell commands, each `ats run` asks too. Do not add an allow rule such as `Bash(ats run:*)`, because it allows any command.
 
 ## Configuration
 
-Files live in `~/Library/Application Support/ats/`.
+The files are in `~/Library/Application Support/ats/`.
 
-`config.toml` lists programs that run the rest of their arguments as a command, so `ats` recognizes the command inside:
+`config.toml` lists programs that run the rest of their arguments as a command. With this list, `ats` recognizes the command in them:
 
 ```toml
 [recognize]
 wrappers = ["mytool"]
 ```
 
-Tool profiles say how to recognize a tool, how much memory it typically needs, which paths it writes and how to set its parallelism. Files in `profiles.d/` add profiles or replace built-in ones by name; see `profiles/builtin.toml` for the format.
+A tool profile tells how to recognize a tool, how much memory it usually needs, which paths it writes, and how to set its parallelism. Files in `profiles.d/` add profiles or replace built-in profiles of the same name. For the format, see `profiles/builtin.toml`.
 
 ## License
 

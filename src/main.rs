@@ -61,7 +61,8 @@ enum Command {
         /// Return at once with the status line.
         #[arg(long)]
         no_wait: bool,
-        /// The agent session, added by its hook.
+        /// The agent session; by default the one the agent sets in the
+        /// environment.
         #[arg(long, hide = true)]
         session: Option<String>,
         #[command(flatten)]
@@ -180,12 +181,15 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
                 None => runspec::RunSpec::Argv { argv },
             };
             // Inside a job the command runs directly: queueing it would
-            // wait on the job that is already holding its memory (design 6.3).
-            if std::env::var_os(executor::JOB_ENV).is_some() {
+            // wait on the job that is already holding its memory (design
+            // 6.3). Light, interactive and service commands gain nothing
+            // from the queue.
+            if std::env::var_os(executor::JOB_ENV).is_some() || runs_directly(&paths, &spec)? {
                 use std::os::unix::process::CommandExt;
                 return Err(spec.command().exec().into());
             }
             let wait = if no_wait { Duration::ZERO } else { wait };
+            let session = session.or_else(agent_session);
             cli::run(&paths, spec, Some(wait), session, options).await
         }
         Command::Wait { submission, wait } => cli::wait(&paths, &submission, Some(wait)).await,
@@ -198,15 +202,6 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Cancel { submission } => cli::mark(&paths, &submission, "cancel").await,
         Command::Detach { submission } => cli::mark(&paths, &submission, "detach").await,
         Command::Status { state, json, .. } => {
-            if let Some(home) = dirs::home_dir() {
-                for agent in install::agents(&home, &[]) {
-                    for command in install::other_rewriters(&home, agent) {
-                        eprintln!(
-                            "[ats] `{command}` also rewrites shell commands next to ats's hook; run `ats install` so ats runs it first."
-                        );
-                    }
-                }
-            }
             let path = match state {
                 Some(s) => format!("/v1/jobs?state={s}"),
                 None => "/v1/jobs".to_string(),
@@ -254,17 +249,12 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             )?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Hook { agent, event } => match hook::run(&paths, agent, event).await? {
-            hook::Answer::Nothing => Ok(ExitCode::SUCCESS),
-            hook::Answer::Json(out) => {
+        Command::Hook { event, .. } => {
+            if let hook::Answer::Json(out) = hook::run(&paths, event).await? {
                 println!("{out}");
-                Ok(ExitCode::SUCCESS)
             }
-            hook::Answer::Block(reason) => {
-                eprint!("{reason}");
-                Ok(ExitCode::from(2))
-            }
-        },
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Analyze { sh, argv } => {
             let config = config::Config::load(&paths)?;
             let profiles = profile::Profiles::load(Some(&paths.profiles))?;
@@ -284,6 +274,30 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// Whether the command is light, interactive or a service (design 8.2).
+fn runs_directly(paths: &paths::Paths, spec: &runspec::RunSpec) -> Result<bool> {
+    let config = config::Config::load(paths)?;
+    let profiles = profile::Profiles::load(Some(&paths.profiles))?;
+    let recognizer = recognize::Recognizer::new(&profiles, &config.recognize.wrappers);
+    let cwd = std::env::current_dir()?;
+    let analysis = match spec {
+        runspec::RunSpec::Sh { source, .. } => recognizer.shell(source, &cwd),
+        runspec::RunSpec::Argv { argv } => recognizer.argv(argv, &cwd),
+    };
+    Ok(analysis.light || analysis.interactive || analysis.segments.iter().any(|s| s.service))
+}
+
+/// The agent session the command comes from, as the agent sets it in the
+/// environment of its shell commands (design 6.2). An agent started from
+/// another agent's command also inherits the outer agent's variable;
+/// Codex is checked first, which is right for Codex started from Claude
+/// Code.
+fn agent_session() -> Option<String> {
+    ["CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))
 }
 
 fn print_jobs(jobs: &serde_json::Value) {

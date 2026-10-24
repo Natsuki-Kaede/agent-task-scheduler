@@ -1,9 +1,10 @@
-//! `ats install` and `ats uninstall` (design 5.3, 6.1, 12): the agents' hook
-//! configuration, an instruction block in their global instructions, and
-//! the LaunchAgent that keeps the daemon running.
+//! `ats install` and `ats uninstall` (design 5.3, 6.1, 12): the
+//! instructions that tell agents which commands to send to `ats run`, the
+//! reminder hooks, and the LaunchAgent that keeps the daemon running.
 //! Every change is shown as a diff and written only after confirmation,
-//! with a backup of each file first. The hooks moved into ats's chain are
-//! kept as they were in `installed.json`, so uninstall puts them back.
+//! with a backup of each file first. Earlier versions moved other hooks
+//! into a chain of their own and kept them in `installed.json`; install and
+//! uninstall put them back.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -20,25 +21,35 @@ use crate::paths::Paths;
 const LABEL: &str = "io.github.natsuki-kaede.ats";
 const BEGIN: &str = "<!-- ats:begin -->";
 const END: &str = "<!-- ats:end -->";
+/// The line in CLAUDE.md that imports the instructions file.
+const INCLUDE: &str = "@ats.md";
 const INSTRUCTIONS: &str = "\
 ## Agent Task Scheduler (ats)
 
-Shell commands with real load run through `ats`, which starts them when the machine has memory for them, so parallel sessions do not slow each other down. A hook rewrites them into `ats run`; you do not need to call it yourself.
+ats is a local queue for heavy shell commands. It starts each command when the machine has memory for it, so parallel agent sessions do not slow each other down.
 
-- When the command finishes within 90 seconds, its output and exit code come back unchanged.
-- Exit code 75 with an `[ats] submission ...` line: the command is still running in the background. Get the result with `ats wait <submission>` (up to 90 seconds per call), follow its output with `ats logs <submission> -f`, or leave it running with `ats detach <submission>`; you are told at your next turn when it ends.
-- Exit code 76: a predecessor given with `--after` failed. 77: ats rejected the submission. 78: ats itself failed.
-- `ats why <submission>` explains a wait. Use `ats run --now` only when the user asks to run something immediately.";
+Send a command through ats when it can use much CPU, memory, disk or network, or when it can run for more than about 30 seconds:
 
-/// Hook events ats answers: the event, its matcher, and the `ats hook`
-/// event name.
-const EVENTS: [(&str, Option<&str>, &str); 3] = [
-    ("PreToolUse", Some("Bash"), "pre-tool-use"),
-    ("Stop", None, "stop"),
-    ("UserPromptSubmit", None, "user-prompt-submit"),
-];
+- builds, test suites, packaging and large lint runs: `cargo build`, `cargo test`, `npm run build`, `make`, `xcodebuild`, `gradle`, `pytest`
+- dependency installs, large downloads and container builds: `npm install`, `pip install`, `docker build`
+- model training or inference, data processing, and conversion or compression of large files
 
-/// A hook moved into ats's chain, as it was and where it was.
+Write it as `ats run -- <program> <args>` or `ats run --sh '<shell command>'`. Put a `cd` before `ats run`, not in it: `cd sub && ats run -- make`.
+
+Run other commands directly: `ls`, `cat`, `cd`, `mkdir`, `cp`, `mv`, `git status`, `git diff`, small `git` operations, `grep` or `rg` in a small tree, `ping`, version and help output, editors and other interactive commands, and servers that do not stop.
+
+- When the command ends in 90 seconds or less, ats gives its output and exit code unchanged.
+- Exit code 75 and an `[ats] submission ...` line: the command continues in the background. Run `ats wait <submission>` to get its output and exit code. Each call waits for up to 90 seconds. If you do not need the result now, run `ats detach <submission>`. You are told at your next turn when it ends.
+- Exit code 76: a predecessor given with `--after` failed. 77: ats did not accept the submission. 78: ats failed.
+- Run `ats why <submission>` to see why a command waits. Do not use `ats run --now` unless the user asks to run something immediately.";
+
+/// Hook events ats answers, with their `ats hook` names.
+const EVENTS: [(&str, &str); 2] = [("Stop", "stop"), ("UserPromptSubmit", "user-prompt-submit")];
+/// `ats hook` names of earlier versions, removed on install and uninstall.
+const OLD_EVENTS: [(&str, &str); 1] = [("PreToolUse", "pre-tool-use")];
+
+/// A hook an earlier `ats install` moved into its chain, as it was and
+/// where it was.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Moved {
     pub group: usize,
@@ -46,7 +57,7 @@ pub struct Moved {
     pub hook: Value,
 }
 
-/// What `ats install` moved, per agent.
+/// What earlier versions of `ats install` moved, per agent.
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
 pub struct Record {
     #[serde(default)]
@@ -61,16 +72,6 @@ impl Record {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Record::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", paths.installed.display())),
         }
-    }
-
-    /// The commands of the hooks ats runs before its own rewrite.
-    pub fn chain(&self, agent: Agent) -> Vec<String> {
-        self.agents
-            .get(name(agent))
-            .into_iter()
-            .flatten()
-            .filter_map(|m| m.hook["command"].as_str().map(str::to_string))
-            .collect()
     }
 }
 
@@ -95,6 +96,12 @@ fn files(home: &Path, agent: Agent) -> (PathBuf, PathBuf) {
     }
 }
 
+/// The instructions file CLAUDE.md imports. Codex does not expand imports
+/// in AGENTS.md, so its instructions are written in place.
+fn include_file(home: &Path) -> PathBuf {
+    home.join(".claude/ats.md")
+}
+
 /// The agents named, or else those set up on this machine.
 pub fn agents(home: &Path, named: &[Agent]) -> Vec<Agent> {
     if !named.is_empty() {
@@ -111,7 +118,8 @@ fn is_ats(hook: &Value, agent: Agent) -> bool {
     command.contains("ats")
         && EVENTS
             .iter()
-            .any(|(_, _, e)| command.ends_with(&format!(" hook {} {e}", name(agent))))
+            .chain(&OLD_EVENTS)
+            .any(|(_, e)| command.ends_with(&format!(" hook {} {e}", name(agent))))
 }
 
 fn groups<'a>(doc: &'a mut Value, event: &str) -> Option<&'a mut Vec<Value>> {
@@ -133,7 +141,7 @@ fn tidy(doc: &mut Value) {
 }
 
 fn remove_ats(doc: &mut Value, agent: Agent) {
-    for (event, _, _) in EVENTS {
+    for (event, _) in EVENTS.iter().chain(&OLD_EVENTS) {
         for group in groups(doc, event).into_iter().flatten() {
             if let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                 hooks.retain(|h| !is_ats(h, agent));
@@ -149,61 +157,21 @@ fn add_ats(doc: &mut Value, agent: Agent, ats: &Path) {
         .expect("an object")
         .entry("hooks")
         .or_insert_with(|| json!({}));
-    for (event, matcher, hook_event) in EVENTS {
+    for (event, hook_event) in EVENTS {
         let command = format!(
             "{} hook {} {hook_event}",
             quote(&ats.to_string_lossy()),
             name(agent)
         );
-        let mut group = json!({ "hooks": [{ "type": "command", "command": command }] });
-        if let Some(m) = matcher {
-            group = json!({ "matcher": m, "hooks": group["hooks"] });
-        }
         let list = hooks
             .as_object_mut()
             .expect("an object")
             .entry(event)
             .or_insert_with(|| json!([]));
-        list.as_array_mut().expect("an array").push(group);
+        list.as_array_mut()
+            .expect("an array")
+            .push(json!({ "hooks": [{ "type": "command", "command": command }] }));
     }
-}
-
-/// Other hooks that only see shell commands before they run: the ones
-/// that may rewrite them.
-fn candidates(doc: &Value) -> Vec<Moved> {
-    let mut out = Vec::new();
-    for (g, group) in doc["hooks"]["PreToolUse"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .enumerate()
-    {
-        if group["matcher"] != "Bash" {
-            continue;
-        }
-        for (i, hook) in group["hooks"].as_array().into_iter().flatten().enumerate() {
-            out.push(Moved {
-                group: g,
-                index: i,
-                hook: hook.clone(),
-            });
-        }
-    }
-    out
-}
-
-fn move_out(doc: &mut Value, moved: &[Moved]) {
-    let mut order: Vec<&Moved> = moved.iter().collect();
-    order.sort_by_key(|m| std::cmp::Reverse((m.group, m.index)));
-    for m in order {
-        if let Some(hooks) = groups(doc, "PreToolUse")
-            .and_then(|g| g.get_mut(m.group))
-            .and_then(|g| g["hooks"].as_array_mut())
-        {
-            hooks.remove(m.index);
-        }
-    }
-    tidy(doc);
 }
 
 /// Puts moved hooks back where they were: into the `Bash` group at their
@@ -253,6 +221,7 @@ fn without_block(text: &str) -> String {
     }
 }
 
+/// `text` with ats's instruction block at the end.
 fn with_block(text: &str) -> String {
     let base = without_block(text);
     let block = format!("{BEGIN}\n{INSTRUCTIONS}\n{END}\n");
@@ -260,6 +229,31 @@ fn with_block(text: &str) -> String {
         block
     } else {
         format!("{}\n\n{block}", base.trim_end_matches('\n'))
+    }
+}
+
+/// `text` without the import line, or a block an earlier version wrote.
+fn without_include(text: &str) -> String {
+    let base = without_block(text);
+    let line = format!("{INCLUDE}\n");
+    if base == line {
+        return String::new();
+    }
+    for added in [format!("\n\n{line}"), format!("\n{line}")] {
+        if let Some(i) = base.find(&added) {
+            return format!("{}\n{}", &base[..i], &base[i + added.len()..]);
+        }
+    }
+    base
+}
+
+/// `text` with the import line at the end.
+fn with_include(text: &str) -> String {
+    let base = without_include(text);
+    if base.trim().is_empty() {
+        format!("{INCLUDE}\n")
+    } else {
+        format!("{}\n\n{INCLUDE}\n", base.trim_end_matches('\n'))
     }
 }
 
@@ -338,45 +332,13 @@ fn launchctl(home: &Path, load: bool, out: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// Hooks besides ats's that rewrite shell commands for `agent`: ones added
-/// after `ats install` moved the others into its chain.
-pub fn other_rewriters(home: &Path, agent: Agent) -> Vec<String> {
-    let path = files(home, agent).0;
-    let Some(doc) = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-    else {
-        return Vec::new();
-    };
-    let has_ats = candidates(&doc).iter().any(|c| is_ats(&c.hook, agent));
-    if !has_ats {
-        return Vec::new();
-    }
-    candidates(&doc)
-        .into_iter()
-        .filter(|c| !is_ats(&c.hook, agent))
-        .filter_map(|c| c.hook["command"].as_str().map(str::to_string))
-        .collect()
-}
-
-/// Claude Code checks permission rules against the rewritten command, so
-/// rules that allow particular shell commands stop matching them. Modes
-/// that ask for no approval are not affected.
-fn shell_allow_rules(doc: &Value) -> Vec<String> {
-    let mode = doc["permissions"]["defaultMode"]
-        .as_str()
-        .unwrap_or("default");
-    if matches!(mode, "auto" | "bypassPermissions") {
-        return Vec::new();
-    }
-    doc["permissions"]["allow"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .filter(|r| r.starts_with("Bash(") && !r.starts_with("Bash(ats"))
-        .map(str::to_string)
-        .collect()
+/// In Claude Code modes that ask before shell commands, each `ats run`
+/// asks too. An allow rule for `ats run` would allow any command.
+fn claude_asks(doc: &Value) -> bool {
+    !matches!(
+        doc["permissions"]["defaultMode"].as_str(),
+        Some("auto" | "bypassPermissions")
+    )
 }
 
 /// One file to write; `new` is `None` to remove the file.
@@ -436,23 +398,22 @@ pub fn install(
         let old = read(&hooks_file)?;
         let mut doc = parse(&hooks_file, old.as_deref())?;
         remove_ats(&mut doc, agent);
-        let mut chosen = Vec::new();
-        for c in candidates(&doc) {
-            let command = c.hook["command"].as_str().unwrap_or("?");
-            let question = format!(
-                "{} also runs `{command}` on every shell command. If it rewrites commands, ats runs it first and wraps its result. Move it into ats's hook?",
-                hooks_file.display()
-            );
-            if ask(input, out, &question)? {
-                chosen.push(c);
-            }
+        let moved = record.agents.remove(name(agent)).unwrap_or_default();
+        if !moved.is_empty() {
+            notes.push(format!(
+                "An earlier ats install moved these hooks of {}; they go back: {}",
+                hooks_file.display(),
+                moved
+                    .iter()
+                    .filter_map(|m| m.hook["command"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
-        move_out(&mut doc, &chosen);
+        restore(&mut doc, &moved);
         add_ats(&mut doc, agent, ats);
-        if agent == Agent::Claude {
-            notes.extend(shell_allow_rules(&doc).into_iter().map(|r| format!(
-                "Claude Code checks permission rules against the rewritten command `ats run ... --sh '...'`, so the rule {r} no longer matches what it allowed; those commands will ask for permission."
-            )));
+        if agent == Agent::Claude && claude_asks(&doc) {
+            notes.push("Claude Code asks before each `ats run` command in this permission mode. Do not allow `Bash(ats run:*)`: it would allow any command.".into());
         }
         changes.push(Change {
             path: hooks_file,
@@ -460,16 +421,23 @@ pub fn install(
             old,
         });
         let old = read(&instructions)?;
+        let new = match agent {
+            Agent::Claude => {
+                let file = include_file(home);
+                changes.push(Change {
+                    old: read(&file)?,
+                    new: Some(format!("{INSTRUCTIONS}\n")),
+                    path: file,
+                });
+                with_include(old.as_deref().unwrap_or_default())
+            }
+            Agent::Codex => with_block(old.as_deref().unwrap_or_default()),
+        };
         changes.push(Change {
             path: instructions,
-            new: Some(with_block(old.as_deref().unwrap_or_default())),
+            new: Some(new),
             old,
         });
-        record
-            .agents
-            .entry(name(agent).into())
-            .or_default()
-            .extend(chosen);
     }
     let service = launch_agent(home);
     changes.push(Change {
@@ -478,7 +446,7 @@ pub fn install(
         path: service,
     });
     if agents.contains(&Agent::Codex) {
-        notes.push("Codex queues commands through ats only in sessions that need no approval (approval policy \"never\", such as full access); in other sessions they run directly. Codex asks you to trust the changed hooks the next time it starts.".into());
+        notes.push("Codex asks you to trust the changed hooks the next time it starts.".into());
     }
     // Shown with the diffs, before the question.
     for note in &notes {
@@ -519,12 +487,25 @@ pub fn uninstall(
             });
         }
         if let Some(old) = read(&instructions)? {
-            let new = Some(without_block(&old)).filter(|t| !t.trim().is_empty());
+            let new = match agent {
+                Agent::Claude => without_include(&old),
+                Agent::Codex => without_block(&old),
+            };
             changes.push(Change {
                 path: instructions,
-                new,
+                new: Some(new).filter(|t| !t.trim().is_empty()),
                 old: Some(old),
             });
+        }
+        if agent == Agent::Claude {
+            let file = include_file(home);
+            if let Some(old) = read(&file)? {
+                changes.push(Change {
+                    path: file,
+                    old: Some(old),
+                    new: None,
+                });
+            }
         }
     }
     let service = launch_agent(home);
@@ -671,6 +652,10 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
+    fn read_json(path: &Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
     #[test]
     fn installs_and_uninstalls_without_a_trace() {
         let (_dir, paths, home) = setup();
@@ -685,12 +670,14 @@ mod tests {
         let agents = agents(&home, &[]);
         assert_eq!(agents, [Agent::Claude], "only the agent set up here");
 
-        // Move the rewriting hook, then confirm.
         let shown = run(
             |i, o| install(&paths, &home, &agents, ats, false, i, o),
-            "y\ny\n",
+            "y\n",
         );
-        assert!(shown.contains("+    \"Stop\": ["), "{shown}");
+        assert!(
+            shown.contains("asks before each `ats run`"),
+            "default mode: {shown}"
+        );
         let service = launch_agent(&home);
         let lint = std::process::Command::new("plutil")
             .arg("-lint")
@@ -707,32 +694,30 @@ mod tests {
                 .unwrap()
                 .contains("<string>/opt/ats</string>")
         );
-        let doc: Value =
-            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        let doc = read_json(&settings);
         let keys: Vec<&String> = doc.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["$schema", "hooks", "theme"], "key order kept");
-        let pre = doc["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre.len(), 2);
         assert_eq!(
-            pre[0]["hooks"][0]["command"], "observe pre",
-            "hooks for every tool stay"
-        );
-        assert_eq!(
-            pre[1]["hooks"][0]["command"],
-            "/opt/ats hook claude pre-tool-use"
+            doc["hooks"]["PreToolUse"],
+            read_json_str(SETTINGS)["hooks"]["PreToolUse"],
+            "other hooks stay"
         );
         assert_eq!(
             doc["hooks"]["Stop"][0]["hooks"][0]["command"],
             "/opt/ats hook claude stop"
         );
         assert_eq!(
-            Record::load(&paths).unwrap().chain(Agent::Claude),
-            ["wrap hook claude"]
+            doc["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            "/opt/ats hook claude user-prompt-submit"
         );
-        let text = std::fs::read_to_string(&instructions).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&instructions).unwrap(),
+            "# Mine\n\nKeep this.\n\n@ats.md\n"
+        );
         assert!(
-            text.starts_with("# Mine\n\nKeep this.\n\n<!-- ats:begin -->")
-                && text.ends_with("<!-- ats:end -->\n")
+            std::fs::read_to_string(include_file(&home))
+                .unwrap()
+                .contains("ats run --")
         );
         assert!(
             paths
@@ -759,28 +744,68 @@ mod tests {
             original,
             "byte for byte"
         );
-        assert!(
-            !launch_agent(&home).exists(),
-            "the LaunchAgent goes with a full uninstall"
-        );
         assert_eq!(
             std::fs::read_to_string(&instructions).unwrap(),
             "# Mine\n\nKeep this.\n"
         );
-        assert!(
-            Record::load(&paths)
-                .unwrap()
-                .chain(Agent::Claude)
-                .is_empty()
-        );
+        assert!(!include_file(&home).exists() && !service.exists());
+    }
+
+    fn read_json_str(text: &str) -> Value {
+        serde_json::from_str(text).unwrap()
     }
 
     #[test]
-    fn names_shell_allow_rules_that_stop_matching() {
-        let doc = |mode: &str| json!({"permissions": {"defaultMode": mode, "allow": ["Bash(cargo build:*)", "Bash(ats status)", "Read"]}});
-        assert_eq!(shell_allow_rules(&doc("default")), ["Bash(cargo build:*)"]);
-        assert!(shell_allow_rules(&doc("auto")).is_empty());
-        assert!(shell_allow_rules(&json!({})).is_empty());
+    fn replaces_what_an_earlier_version_installed() {
+        let (_dir, paths, home) = setup();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let settings = home.join(".claude/settings.json");
+        // An earlier install moved the rewriting hook into its chain, added
+        // a PreToolUse hook, and wrote its instructions in place.
+        let mut earlier = read_json_str(SETTINGS);
+        earlier["hooks"]["PreToolUse"][1] = json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": "/opt/ats hook claude pre-tool-use" }] });
+        earlier["permissions"] = json!({ "defaultMode": "auto" });
+        std::fs::write(&settings, json_text(&earlier)).unwrap();
+        let record = json!({ "agents": { "claude": [
+            { "group": 1, "index": 0, "hook": { "type": "command", "command": "wrap hook claude", "timeout": 5 } }
+        ] } });
+        std::fs::create_dir_all(&paths.home).unwrap();
+        std::fs::write(&paths.installed, record.to_string()).unwrap();
+        std::fs::write(
+            home.join(".claude/CLAUDE.md"),
+            format!("# Mine\n\n{BEGIN}\nold\n{END}\n"),
+        )
+        .unwrap();
+
+        let shown = run(
+            |i, o| {
+                install(
+                    &paths,
+                    &home,
+                    &[Agent::Claude],
+                    Path::new("/opt/ats"),
+                    false,
+                    i,
+                    o,
+                )
+            },
+            "y\n",
+        );
+        assert!(
+            shown.contains("they go back: wrap hook claude") && !shown.contains("asks before each"),
+            "{shown}"
+        );
+        let doc = read_json(&settings);
+        assert_eq!(
+            doc["hooks"]["PreToolUse"],
+            read_json_str(SETTINGS)["hooks"]["PreToolUse"],
+            "the moved hook is back"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap(),
+            "# Mine\n\n@ats.md\n"
+        );
+        assert_eq!(Record::load(&paths).unwrap(), Record::default());
     }
 
     #[test]
@@ -800,18 +825,22 @@ mod tests {
                     o,
                 )
             },
-            "n\nn\n",
+            "n\n",
         );
         assert!(shown.ends_with("Nothing written.\n"), "{shown}");
         assert_eq!(
             std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(),
             SETTINGS
         );
-        assert!(!home.join(".claude/CLAUDE.md").exists() && !paths.installed.exists());
+        assert!(
+            !home.join(".claude/CLAUDE.md").exists()
+                && !include_file(&home).exists()
+                && !paths.installed.exists()
+        );
     }
 
     #[test]
-    fn files_it_created_are_removed_again() {
+    fn codex_gets_its_instructions_in_place_and_loses_them_again() {
         let (_dir, paths, home) = setup();
         let ats = Path::new("/Applications/My Tools/ats");
         run(
@@ -820,10 +849,11 @@ mod tests {
         );
         let hooks = std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
         assert!(
-            hooks.contains(r"'/Applications/My Tools/ats' hook codex pre-tool-use"),
+            hooks.contains(r"'/Applications/My Tools/ats' hook codex stop"),
             "{hooks}"
         );
-        assert!(home.join(".codex/AGENTS.md").exists());
+        let agents_md = std::fs::read_to_string(home.join(".codex/AGENTS.md")).unwrap();
+        assert!(agents_md.starts_with(BEGIN) && agents_md.contains("ats run --"));
         run(
             |i, o| uninstall(&paths, &home, &[Agent::Codex], true, false, i, o),
             "y\n",
@@ -850,5 +880,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("is not valid JSON"), "{err:#}");
+    }
+
+    #[test]
+    fn the_import_line_comes_and_goes_cleanly() {
+        for (text, back) in [
+            ("", ""),
+            ("# Mine\n", "# Mine\n"),
+            ("# Mine\n\n\n", "# Mine\n"),
+            ("@ats.md\n", ""),
+        ] {
+            let with = with_include(text);
+            assert!(
+                with.ends_with("@ats.md\n") && with.matches(INCLUDE).count() == 1,
+                "{text:?}"
+            );
+            assert_eq!(without_include(&with), back, "{text:?}");
+        }
     }
 }
