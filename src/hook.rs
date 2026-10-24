@@ -57,6 +57,7 @@ pub enum Answer {
 
 /// Everything a rewrite needs besides the hook input.
 pub struct Setup {
+    pub agent: Agent,
     pub profiles: Profiles,
     pub wrappers: Vec<String>,
     /// Other rewriting hooks, run first in order.
@@ -72,6 +73,7 @@ impl Setup {
         let config = Config::load(paths)?;
         let chain = crate::install::Record::load(paths)?.chain(agent);
         Ok(Setup {
+            agent,
             profiles: Profiles::load(Some(&paths.profiles))?,
             wrappers: config.recognize.wrappers,
             chain,
@@ -222,6 +224,15 @@ pub fn pre_tool_use(input: &Value, setup: &Setup) -> Answer {
     specific.insert("hookEventName".into(), json!("PreToolUse"));
     specific.insert("updatedInput".into(), input["tool_input"].clone());
     specific.extend(decision);
+    // Codex applies a changed input only with `allow`, which also skips
+    // its approval. ats gives it only where Codex asks for no approval;
+    // elsewhere the command runs as the agent sent it.
+    if setup.agent == Agent::Codex {
+        if input["permission_mode"] != "bypassPermissions" {
+            return Answer::Nothing;
+        }
+        specific.insert("permissionDecision".into(), json!("allow"));
+    }
     Answer::Json(json!({ "hookSpecificOutput": specific }))
 }
 
@@ -346,6 +357,7 @@ mod tests {
 
     fn setup(chain: &[&str]) -> Setup {
         Setup {
+            agent: Agent::Claude,
             profiles: Profiles::builtin(),
             wrappers: vec!["wrap".into()],
             chain: chain.iter().map(|c| c.to_string()).collect(),
@@ -482,6 +494,25 @@ mod tests {
         assert_eq!(
             pre_tool_use(&input("cargo build", dir.path()), &setup(&[block])),
             Answer::Block("no\n".into())
+        );
+    }
+
+    #[test]
+    fn codex_gets_allow_only_where_it_asks_for_no_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = setup(&[]);
+        s.agent = Agent::Codex;
+        let mut call = input("cargo build", dir.path());
+        call["permission_mode"] = json!("bypassPermissions");
+        let Answer::Json(out) = pre_tool_use(&call, &s) else {
+            panic!("not rewritten");
+        };
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
+        call["permission_mode"] = json!("default");
+        assert_eq!(
+            pre_tool_use(&call, &s),
+            Answer::Nothing,
+            "the agent's approval stays"
         );
     }
 
