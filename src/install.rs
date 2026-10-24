@@ -308,16 +308,37 @@ fn plist(paths: &Paths, ats: &Path) -> String {
     )
 }
 
-/// Loads or unloads the LaunchAgent in this user's session.
-fn launchctl(home: &Path, load: bool, out: &mut impl Write) -> Result<()> {
+fn loaded(target: &str) -> bool {
+    std::process::Command::new("launchctl")
+        .args(["print", target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Loads or unloads the LaunchAgent in this user's session. A loaded
+/// agent is reloaded only when `changed`: reloading restarts the daemon.
+fn launchctl(home: &Path, load: bool, changed: bool, out: &mut impl Write) -> Result<()> {
     // SAFETY: getuid cannot fail.
     let domain = format!("gui/{}", unsafe { libc::getuid() });
-    // Unloading first lets a reinstall pick up a changed file; it fails
-    // harmlessly when nothing is loaded.
-    let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &format!("{domain}/{LABEL}")])
-        .stderr(std::process::Stdio::null())
-        .status();
+    let target = format!("{domain}/{LABEL}");
+    if load && !changed && loaded(&target) {
+        return Ok(());
+    }
+    if loaded(&target) {
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootout", &target])
+            .status();
+        // launchd can still hold the agent when bootout returns, and a
+        // bootstrap then fails.
+        for _ in 0..50 {
+            if !loaded(&target) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
     if load {
         let status = std::process::Command::new("launchctl")
             .args(["bootstrap", &domain])
@@ -440,9 +461,11 @@ pub fn install(
         });
     }
     let service = launch_agent(home);
+    let (old, new) = (read(&service)?, plist(paths, ats));
+    let changed = old.as_deref() != Some(new.as_str());
     changes.push(Change {
-        old: read(&service)?,
-        new: Some(plist(paths, ats)),
+        old,
+        new: Some(new),
         path: service,
     });
     if agents.contains(&Agent::Codex) {
@@ -453,7 +476,7 @@ pub fn install(
         writeln!(out, "Note: {note}")?;
     }
     if apply(paths, changes, &record, input, out)? && launchd {
-        launchctl(home, true, out)?;
+        launchctl(home, true, changed, out)?;
     }
     Ok(())
 }
@@ -517,7 +540,7 @@ pub fn uninstall(
         });
     }
     if apply(paths, changes, &record, input, out)? && all && launchd {
-        launchctl(home, false, out)?;
+        launchctl(home, false, true, out)?;
     }
     Ok(())
 }

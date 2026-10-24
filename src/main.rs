@@ -143,6 +143,13 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Commands that print stop quietly when their reader goes away, as in
+    // `ats status | head`. The daemon and executors write to sockets and
+    // must not be killed by a closed one.
+    if !matches!(cli.command, Command::Daemon | Command::Executor { .. }) {
+        // SAFETY: sets the default action before any thread starts.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
     let runtime = tokio::runtime::Runtime::new().expect("starting the async runtime");
     match runtime.block_on(dispatch(cli)) {
         Ok(code) => code,
