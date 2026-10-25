@@ -1,0 +1,74 @@
+src/main.rs
+  s_8704d9ca6bb8f1::t_186eebc44ba187 4-5
+  s_8704d9ca6bb8f1::t_c0dcc84ab0af26 204
+src/sched/pressure.rs
+  s_8704d9ca6bb8f1::t_641bb239f8a59f 11-13,21-24,34,42-45,63-64,68,71,73
+  s_8704d9ca6bb8f1::t_c0dcc84ab0af26 47
+src/sample/tests.rs
+  s_8704d9ca6bb8f1::t_d4e5e3818400c9 51
+src/install/service.rs
+  s_8704d9ca6bb8f1::t_f0cdfa0171ea70 1-16,18,20-128,130-212,218-222,227-229
+  s_8704d9ca6bb8f1::t_c0dcc84ab0af26 17,19,129,213-217,223-226
+scripts/formula.sh
+  s_8704d9ca6bb8f1::t_35fdeed0b6b7ce 1-25
+src/install/mod.rs
+  s_8704d9ca6bb8f1::t_11f5edfcecb51a 705
+  s_8704d9ca6bb8f1::t_48fea7ea0d1bc4 1-477,483-643,645,647-704,706-937
+  s_8704d9ca6bb8f1::t_c0dcc84ab0af26 478-482
+  s_8704d9ca6bb8f1::t_f0cdfa0171ea70 644,646
+src/daemon/pressure.rs
+  s_8704d9ca6bb8f1::t_641bb239f8a59f 29-31,52,60
+src/timing.rs
+  s_8704d9ca6bb8f1::t_186eebc44ba187 6-11,25
+api/openapi.yaml
+  s_8704d9ca6bb8f1::t_f709744f26308c 347-349,359-360,474-475,477
+src/sample/linux.rs
+  s_8704d9ca6bb8f1::t_c0dcc84ab0af26 48-52,106-110
+  s_8704d9ca6bb8f1::t_874094c4266c69 1-47,53-105,111-122
+src/sample/mod.rs
+  s_8704d9ca6bb8f1::t_874094c4266c69 2-4,114
+  s_8704d9ca6bb8f1::t_046b08166bac8d 6-8,11-15,24,108-111,168
+  s_8704d9ca6bb8f1::t_641bb239f8a59f 32-33,35-36,64-65,133,138,141,154
+  s_8704d9ca6bb8f1::t_2d905f933da876 112-113
+src/procinfo.rs
+  s_8704d9ca6bb8f1::t_3fc57954a8ab3b 44-51,56-74,130
+  s_8704d9ca6bb8f1::t_c0dcc84ab0af26 52-55
+src/executor/mod.rs
+  s_8704d9ca6bb8f1::t_186eebc44ba187 278-279,285-287
+AGENTS.md
+  s_8704d9ca6bb8f1::t_f5aa14d47712bc 23
+  s_8704d9ca6bb8f1::t_0cbb6217588fc2 13,19-20
+packaging/homebrew/ats.rb
+  s_8704d9ca6bb8f1::t_35fdeed0b6b7ce 1-2,9-29
+src/sample/macos.rs
+  s_8704d9ca6bb8f1::t_641bb239f8a59f 56
+  s_8704d9ca6bb8f1::t_046b08166bac8d 57
+README.md
+  s_8704d9ca6bb8f1::t_0cbb6217588fc2 3,9,12,31,37,39,73
+.github/workflows/release.yml
+  s_8704d9ca6bb8f1::t_35fdeed0b6b7ce 1-46
+scripts/release.sh
+  s_8704d9ca6bb8f1::t_35fdeed0b6b7ce 2-3,7-8
+INSTALL.md
+  s_8704d9ca6bb8f1::t_f5aa14d47712bc 9-18,30,33-34,37-41,43,55,59,63-65
+.github/workflows/ci.yml
+  s_8704d9ca6bb8f1::t_35fdeed0b6b7ce 1-18
+src/control.rs
+  s_8704d9ca6bb8f1::t_3fc57954a8ab3b 1-6,9-19,33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "73fa49729c8efea98505d66b5f8884bac05c006d",
+  "prompts": {},
+  "sessions": {
+    "s_8704d9ca6bb8f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dfb3ab59-8a7c-47d3-bdd2-94bd64d1013e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
