@@ -1,0 +1,25 @@
+INSTALL.md
+  s_8704d9ca6bb8f1::t_b64f0ce050de86 76
+src/daemon/scheduler.rs
+  s_8704d9ca6bb8f1::t_71be1580515ff7 65
+src/sample/macos.rs
+  s_8704d9ca6bb8f1::t_d27606f11ecfb0 27-28,30
+README.md
+  s_8704d9ca6bb8f1::t_b64f0ce050de86 43-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d8d0f023cc3028bc2f2684a179cdc41c045d95e2",
+  "prompts": {},
+  "sessions": {
+    "s_8704d9ca6bb8f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dfb3ab59-8a7c-47d3-bdd2-94bd64d1013e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
