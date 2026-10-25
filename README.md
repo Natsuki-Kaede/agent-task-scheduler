@@ -1,5 +1,7 @@
 # Agent Task Scheduler (ats)
 
+English | [简体中文](README.zh-CN.md)
+
 Several AI agent sessions on one computer can build, test and run models at the same time. Each session works as if it has the machine for itself. Then memory runs out, the system swaps, and all commands become slow until they time out.
 
 `ats` is a local queue for heavy shell commands. An agent sends a heavy command to `ats run`. A daemon starts the command when the machine has memory for it, and tells the command how many parallel jobs to use. The command runs in the environment of the agent. Its output and exit code come back unchanged.
