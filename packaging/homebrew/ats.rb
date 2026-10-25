@@ -3,7 +3,6 @@
 class Ats < Formula
   desc "Queues resource-heavy commands from AI agents and starts them by available memory"
   homepage "https://github.com/Natsuki-Kaede/agent-task-scheduler"
-  version "@VERSION@"
   license "GPL-3.0-only"
 
   on_macos do
