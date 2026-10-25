@@ -73,4 +73,5 @@ Tell the user these items:
 - which files changed;
 - that new agent sessions read the instructions, and sessions that run now do not;
 - that Codex asks to trust the changed hooks when it starts the next time;
+- on Linux: systemd stops the daemon when the user closes the last login session. If the user works over SSH, `loginctl enable-linger` keeps it running;
 - that `ats uninstall` removes the changes of `ats install`. For a different agent, the user also removes the section between the two markers from the instructions file.

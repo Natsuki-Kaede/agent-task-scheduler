@@ -40,6 +40,8 @@ For other agents, `ats install --service` adds only the login service. `ats inst
 
 Codex asks you to trust the changed hooks when it starts the next time.
 
+On Linux, systemd stops the daemon when you close your last login session. If you work over SSH, run `loginctl enable-linger` to keep it running.
+
 `ats uninstall` removes these items after the same diff and question.
 
 ## Use

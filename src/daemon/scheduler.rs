@@ -62,7 +62,7 @@ pub(super) fn round(state: &AppState) -> Result<()> {
             locks: h.locks.clone(),
             ends_in: h
                 .predicted_seconds
-                .zip(h.started_at.as_deref().and_then(&seconds_since))
+                .zip(h.started_at.as_deref().and_then(seconds_since))
                 .map(|(total, ran)| (total - ran).max(0.0)),
         })
         .collect();

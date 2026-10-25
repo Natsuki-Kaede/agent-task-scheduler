@@ -24,8 +24,10 @@ fn sysctl<T: Copy>(name: &str) -> Option<T> {
     (r == 0 && len == size_of::<T>()).then(|| unsafe { v.assume_init() })
 }
 
+/// The kernel's page size, which page counts use. `hw.pagesize` gives the
+/// page size of this process instead: 4 KB under Rosetta on 16 KB kernels.
 fn page_size() -> u64 {
-    sysctl::<u64>("hw.pagesize").unwrap_or(16384)
+    sysctl::<u64>("vm.pagesize").unwrap_or(16384)
 }
 
 pub fn system() -> Option<System> {
