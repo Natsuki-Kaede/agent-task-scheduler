@@ -10,12 +10,8 @@ use crate::api::AppState;
 use crate::procinfo;
 use crate::sched::{self, Capacity, Dep, Held, Round, Verdict, Waiting};
 use crate::store::Conflict;
-use crate::timing;
 
 const ROUND_EVERY: Duration = Duration::from_secs(1);
-/// After an admission, the next waits this long for the new job's memory to
-/// show in the measurements, unless the job ends first (design 10.1).
-const SETTLE: Duration = Duration::from_secs(3);
 
 fn seconds_between(rfc3339: &str, now: SystemTime) -> Option<f64> {
     let at = humantime::parse_rfc3339(rfc3339).ok()?;
@@ -24,18 +20,16 @@ fn seconds_between(rfc3339: &str, now: SystemTime) -> Option<f64> {
 
 pub async fn run(state: AppState) {
     let mut changes = state.changes.subscribe();
-    let mut admissions = HashMap::new();
     while !state.stopping() {
-        if let Err(e) = round(&state, &mut admissions) {
+        if let Err(e) = round(&state) {
             tracing::error!("scheduling: {e:#}");
         }
         let _ = tokio::time::timeout(ROUND_EVERY, changes.changed()).await;
     }
 }
 
-/// One round. `admissions` holds when each job was admitted, on the clock
-/// that counts sleep.
-pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>) -> Result<()> {
+/// One round.
+pub(super) fn round(state: &AppState) -> Result<()> {
     let snapshot = state
         .measurements
         .lock()
@@ -104,16 +98,11 @@ pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>
         })
         .collect();
 
-    let now = timing::elapsed();
-    admissions.retain(|job, at| {
-        now.saturating_sub(*at) < SETTLE && held_jobs.iter().any(|h| &h.id == job)
-    });
     let verdicts = sched::decide(&Round {
         capacity: &capacity,
         held: &held,
         waiting: &waiting,
         pressure: state.pressure.lock().expect("pressure lock").pressured,
-        settling: !admissions.is_empty(),
         admitting: state.admitting(),
     });
 
@@ -122,7 +111,6 @@ pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>
         .map(|q| (q.id.as_str(), q.state.as_str()))
         .collect();
     let by_id: HashMap<&str, &Waiting> = waiting.iter().map(|w| (w.id.as_str(), w)).collect();
-    let mut running = held.len() as u32;
     let mut changed = false;
     let mut waiting_verdicts = HashMap::new();
     for (id, verdict) in verdicts {
@@ -131,13 +119,12 @@ pub(super) fn round(state: &AppState, admissions: &mut HashMap<String, Duration>
         match &verdict {
             Verdict::Admit => {
                 let reserved = by_id[id.as_str()].reserved;
-                // Cores shared among the running jobs and this one (design 10.5).
-                let parallelism = (system.cores / (running + 1)).max(1);
+                // Every job may use all cores; the system shares them
+                // (design 10.5).
+                let parallelism = system.cores;
                 match store.admit(&id, reserved, parallelism) {
                     Ok(()) => {
                         tracing::info!(job = %id, reserved, parallelism, "admitted");
-                        admissions.insert(id.clone(), now);
-                        running += 1;
                         changed = true;
                         continue;
                     }
@@ -214,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn rounds_admit_settle_block_and_refuse() {
+    fn rounds_admit_block_and_refuse() {
         let state = AppState::new(
             crate::store::Store::open_in_memory().unwrap(),
             "t".into(),
@@ -230,11 +217,9 @@ mod tests {
             }),
             ..Snapshot::default()
         };
-        let mut admissions = HashMap::new();
-
         let a = submit(&state, 2 * G, &[]);
         let a2 = submit(&state, 2 * G, &[]);
-        round(&state, &mut admissions).unwrap();
+        round(&state).unwrap();
         assert_eq!(
             (job_state(&state, &a), job_state(&state, &a2)),
             ("admitted".into(), "admitted".into())
@@ -242,18 +227,19 @@ mod tests {
         let parallelism = |job: &str| state.store().lease_terms(job).unwrap().parallelism;
         assert_eq!(
             (parallelism(&a), parallelism(&a2)),
-            (Some(8), Some(4)),
-            "cores / (running + 1)"
+            (Some(8), Some(8)),
+            "every job may use all cores"
         );
 
-        // With 8G of headroom the next job starts while a and a2 settle.
+        // The next job starts at once while 8G are free.
         let b = submit(&state, G, &[]);
         let too_big = submit(&state, 20 * G, &[]);
-        round(&state, &mut admissions).unwrap();
+        round(&state).unwrap();
         assert_eq!(job_state(&state, &b), "admitted");
         assert_eq!(job_state(&state, &too_big), "capacity_insufficient");
 
-        // With 3G of 16G free, the next waits for them to settle.
+        // When the reservations of the running jobs leave too little, the
+        // next waits for memory.
         state
             .measurements
             .lock()
@@ -261,18 +247,18 @@ mod tests {
             .system
             .as_mut()
             .unwrap()
-            .mem_used = 8 * G;
+            .mem_used = 13 * G;
         let b2 = submit(&state, G, &[]);
-        round(&state, &mut admissions).unwrap();
-        assert_eq!(reason(&state, &b2), sched::Reason::Settling);
+        round(&state).unwrap();
+        assert!(matches!(reason(&state, &b2), sched::Reason::Memory { .. }));
 
-        // A failed predecessor blocks; once the new jobs end, nothing settles.
+        // A failed predecessor blocks; the ended jobs leave room for b2.
         for job in [&a, &a2, &b] {
             let code = if job == &a { 1 } else { 0 };
             state.store().finish(job, "completed", Some(code)).unwrap();
         }
         let c = submit(&state, G, &[&a]);
-        round(&state, &mut admissions).unwrap();
+        round(&state).unwrap();
         assert_eq!(job_state(&state, &c), "blocked");
         assert_eq!(job_state(&state, &b2), "admitted");
         state.store().unblock(&c).unwrap();
@@ -281,16 +267,16 @@ mod tests {
         // Pressure holds admission.
         state.store().finish(&b2, "completed", Some(0)).unwrap();
         state.pressure.lock().unwrap().pressured = true;
-        round(&state, &mut admissions).unwrap();
+        round(&state).unwrap();
         assert_eq!(reason(&state, &c), sched::Reason::Pressure);
         state.pressure.lock().unwrap().pressured = false;
 
         // While executors reconnect after a restart, nothing is admitted.
         state.expect_reconnects(["gone".to_string()].into(), Duration::from_secs(60));
-        round(&state, &mut admissions).unwrap();
+        round(&state).unwrap();
         assert_eq!(reason(&state, &c), sched::Reason::Recovering);
         state.contact("gone");
-        round(&state, &mut admissions).unwrap();
+        round(&state).unwrap();
         assert_eq!(job_state(&state, &c), "admitted");
     }
 }

@@ -439,9 +439,6 @@ fn explain(v: &Value) -> String {
             "the daemon restarted and is waiting for running jobs to reconnect".into()
         }
         (_, Some("pressure")) => "memory pressure is rising, so nothing new is admitted".into(),
-        (_, Some("settling")) => {
-            "the jobs just admitted are still settling; their memory is not measured yet".into()
-        }
         (_, Some("no_executor")) => "its executor has not registered yet".into(),
         (_, Some("dependency")) => format!(
             "waiting for {} to succeed",

@@ -40,7 +40,6 @@ fn round(capacity: &Capacity, held: &[Held], waiting: &[Waiting]) -> Round<'stat
         held: Box::leak(held.to_vec().into_boxed_slice()),
         waiting: Box::leak(waiting.to_vec().into_boxed_slice()),
         pressure: false,
-        settling: false,
         admitting: true,
     }
 }
@@ -77,7 +76,7 @@ fn headroom_follows_the_formula() {
 
 #[test]
 fn admits_by_memory_in_order() {
-    // 8G free: two 3G jobs fit; the round then closes as tight.
+    // 8G free: two 3G jobs fit, and the third waits for memory.
     let out = run(
         &cap(8 * G),
         &[],
@@ -91,7 +90,10 @@ fn admits_by_memory_in_order() {
     assert_eq!(
         verdict(&out, "c"),
         &Verdict::Wait {
-            reason: Reason::Settling
+            reason: Reason::Memory {
+                need: 3 * G,
+                free: 2 * G as i64
+            }
         }
     );
     // A managed job is running, so memory it frees can let this one in.
@@ -148,7 +150,7 @@ fn many_small_jobs_run_together() {
 }
 
 #[test]
-fn pressure_settling_and_recovery_hold_admission() {
+fn pressure_and_recovery_hold_admission() {
     let waiting = [job("a", 30.0, G)];
     let mut r = round(&cap(0), &[], &waiting);
     r.pressure = true;
@@ -159,22 +161,7 @@ fn pressure_settling_and_recovery_hold_admission() {
         }
     );
     r.pressure = false;
-    r.settling = true;
-    assert_eq!(
-        verdict(&decide(&r), "a"),
-        &Verdict::Admit,
-        "wide headroom: no wait for settling"
-    );
-    let mut tight = round(&cap(13 * G), &[], &waiting);
-    tight.settling = true;
-    assert_eq!(
-        verdict(&decide(&tight), "a"),
-        &Verdict::Wait {
-            reason: Reason::Settling
-        },
-        "3G of 16G free is tight"
-    );
-    r.settling = false;
+    assert_eq!(verdict(&decide(&r), "a"), &Verdict::Admit);
     r.admitting = false;
     assert_eq!(
         verdict(&decide(&r), "a"),
@@ -240,13 +227,8 @@ fn now_skips_admission_but_not_conflicts() {
     h.locks = vec![path("/repo")];
     let mut r = round(&cap(15 * G), &[h], &[a, b]);
     r.pressure = true;
-    r.settling = true;
     let out = decide(&r);
-    assert_eq!(
-        admitted(&out),
-        ["a"],
-        "over budget, under pressure, while settling"
-    );
+    assert_eq!(admitted(&out), ["a"], "over budget and under pressure");
     assert!(matches!(
         verdict(&out, "b"),
         Verdict::Wait {

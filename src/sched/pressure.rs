@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use serde::Serialize;
 
 /// Swap-out pages per second, averaged, that count as rising pressure.
-pub const SWAPOUT_RATE: f64 = 64.0;
+pub const SWAPOUT_RATE: f64 = 256.0;
 const WINDOW: usize = 10;
 /// Seconds without pressure before admission and QoS return to normal.
 pub const CALM_SECS: f64 = 30.0;
@@ -58,16 +58,16 @@ mod tests {
     #[test]
     fn averages_and_waits_for_calm() {
         let mut t = Tracker::default();
-        // One spike of 300 averages to 30 over ten seconds: no pressure.
+        // One spike of 2000 averages to 200 over ten seconds: no pressure.
         for s in 0..9 {
             t.update(0.0, 1, f64::from(s));
         }
-        assert!(!t.update(300.0, 1, 9.0).1);
+        assert!(!t.update(2000.0, 1, 9.0).1);
         // Sustained swapping is pressure.
         for s in 10..20 {
-            t.update(200.0, 1, f64::from(s));
+            t.update(400.0, 1, f64::from(s));
         }
-        assert!(t.update(200.0, 1, 20.0).1);
+        assert!(t.update(400.0, 1, 20.0).1);
         // It stays until 30 calm seconds have passed.
         for s in 21..40 {
             t.update(0.0, 1, f64::from(s));

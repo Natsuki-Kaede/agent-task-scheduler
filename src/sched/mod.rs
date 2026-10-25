@@ -64,24 +64,15 @@ pub struct Round<'a> {
     pub waiting: &'a [Waiting],
     /// Memory pressure is up: nothing new is admitted (design 10.2).
     pub pressure: bool,
-    /// A job admitted moments ago may not show its memory in the
-    /// measurements yet; when headroom is tight, admission waits for it
-    /// (design 10.1).
-    pub settling: bool,
     /// False while executors reconnect after a restart (design 7.1).
     pub admitting: bool,
 }
-
-/// Headroom below this fraction of the budget counts as tight: one
-/// admission per round, and none while recent admissions settle.
-const TIGHT: f64 = 0.2;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reason {
     Recovering,
     Pressure,
-    Settling,
     NoExecutor,
     Dependency {
         job: String,
@@ -169,8 +160,6 @@ pub fn decide(r: &Round) -> Vec<(String, Verdict)> {
         .flat_map(|h| h.locks.iter().map(|l| (l.clone(), h.id.clone())))
         .collect();
     let mut admitted_ends: Vec<(f64, u64)> = Vec::new();
-    let tight = |free: i64| free < (c.memory as f64 * TIGHT) as i64;
-    let mut round_closed = false;
     // The first job held back by memory, when it could start, and its
     // locks; later jobs must not delay it.
     let mut head: Option<(String, Option<f64>, Vec<Lock>)> = None;
@@ -212,9 +201,6 @@ pub fn decide(r: &Round) -> Vec<(String, Verdict)> {
             if r.pressure {
                 return wait(Reason::Pressure);
             }
-            if (r.settling && tight(free)) || round_closed {
-                return wait(Reason::Settling);
-            }
             if let Some((head_id, eta, head_locks)) = &head {
                 let ends_first = w.seconds.zip(*eta).is_some_and(|(s, e)| s <= e);
                 let takes_its_lock = w
@@ -246,9 +232,6 @@ pub fn decide(r: &Round) -> Vec<(String, Verdict)> {
             free -= w.reserved as i64;
             locks.extend(w.locks.iter().map(|l| (l.clone(), w.id.clone())));
             admitted_ends.push((w.seconds.unwrap_or(f64::INFINITY), w.reserved));
-            if !w.now && tight(free) {
-                round_closed = true;
-            }
         }
         out.push((w.id.clone(), verdict));
     }

@@ -441,7 +441,7 @@ components:
       description: |
         verdict is admit, wait (with a reason), blocked (with the failed
         predecessor `job`) or capacity_insufficient (with `need` and
-        `budget` in bytes). Wait reasons: recovering, pressure, settling,
+        `budget` in bytes). Wait reasons: recovering, pressure,
         no_executor, dependency (job), lock (resource, holder), memory
         (need, free), behind (head).
       properties:
