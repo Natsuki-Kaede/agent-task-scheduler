@@ -1,0 +1,133 @@
+Cargo.lock
+  s_bb9527a6cd4695::t_ba0fbb2d140f51 1-1203
+Cargo.toml
+  s_8704d9ca6bb8f1::t_a7bc4857569062 1-36
+api/openapi.yaml
+  s_8704d9ca6bb8f1::t_aab146293ca0fc 1-501
+profiles/builtin.toml
+  s_bb9527a6cd4695::t_54dbde23829352 1-461
+scripts/check.sh
+  s_bb9527a6cd4695::t_7427a2966751bd 1-8
+src/api/lifecycle.rs
+  s_bb9527a6cd4695::t_c63cfa4ddfaba4 1-445
+src/api/mod.rs
+  s_bb9527a6cd4695::t_4229f3d45c28b0 1-396
+src/api/plan.rs
+  s_bb9527a6cd4695::t_08ee4cfe8481f2 1-172
+src/channel.rs
+  s_bb9527a6cd4695::t_dc45a8159cc176 1-204
+src/cli.rs
+  s_f3c1b911a8127c::t_07c54bba44d9e8 1-483
+src/client.rs
+  s_bb9527a6cd4695::t_fffbd077fd7f2a 1-110
+src/config.rs
+  s_bb9527a6cd4695::t_f31c479bd00b9c 1-33
+src/control.rs
+  s_8704d9ca6bb8f1::t_a8eb9e9e0a51a4 1-60
+src/daemon/lock.rs
+  s_bb9527a6cd4695::t_c36a7b0d68faed 1-58
+src/daemon/mod.rs
+  s_bb9527a6cd4695::t_42daed95936f15 1-297
+src/daemon/pressure.rs
+  s_8704d9ca6bb8f1::t_9406f685ff1c2d 1-69
+src/daemon/scheduler.rs
+  s_8704d9ca6bb8f1::t_a10e5c2101bc50 1-282
+src/daemon/supervisor.rs
+  s_bb9527a6cd4695::t_fdb9cab1dcf9f6 1-256
+src/executor/jobserver.rs
+  s_bb9527a6cd4695::t_e26b688e3725e9 1-105
+src/executor/logwriter.rs
+  s_bb9527a6cd4695::t_0803c3981c0bbe 1-86
+src/executor/mod.rs
+  s_8704d9ca6bb8f1::t_b6373648458723 1-465
+src/hook.rs
+  s_f3c1b911a8127c::t_d5b849d53a2efb 1-164
+src/ids.rs
+  s_bb9527a6cd4695::t_3f05ae289c45d7 1-25
+src/install/mod.rs
+  s_8704d9ca6bb8f1::t_54657e99ac8b86 1-937
+src/install/service.rs
+  s_8704d9ca6bb8f1::t_7b04c6851cdea1 1-229
+src/main.rs
+  s_8704d9ca6bb8f1::t_d73ca381000632 1-375
+src/paths.rs
+  s_f3c1b911a8127c::t_df7d93cabb212e 1-64
+src/procinfo.rs
+  s_8704d9ca6bb8f1::t_06bfc1d24341cb 1-143
+src/profile.rs
+  s_bb9527a6cd4695::t_de709720f8268d 1-318
+src/recognize/mod.rs
+  s_bb9527a6cd4695::t_24f65f5c85f173 1-505
+src/recognize/shell.rs
+  s_bb9527a6cd4695::t_b4fb3068376d13 1-687
+src/recognize/tests.rs
+  s_bb9527a6cd4695::t_0671ab28454a62 1-282
+src/redact.rs
+  s_bb9527a6cd4695::t_dfc234d825c2bb 1-87
+src/runspec.rs
+  s_bb9527a6cd4695::t_422d8ba96cba0b 1-38
+src/sample/linux.rs
+  s_8704d9ca6bb8f1::t_1ba24312b938a4 1-122
+src/sample/macos.rs
+  s_8704d9ca6bb8f1::t_6a969848fa0aae 1-166
+src/sample/mod.rs
+  s_8704d9ca6bb8f1::t_b5368c3af657c4 1-188
+src/sample/tests.rs
+  s_8704d9ca6bb8f1::t_20d3b7502c1eb2 1-74
+src/sched/locks.rs
+  s_bb9527a6cd4695::t_50601b2ec77be1 1-284
+src/sched/mod.rs
+  s_f3c1b911a8127c::t_89d88f778a91c1 1-242
+src/sched/predict.rs
+  s_bb9527a6cd4695::t_4ddf548edafd0f 1-402
+src/sched/pressure.rs
+  s_8704d9ca6bb8f1::t_9583c68f109302 1-83
+src/sched/tests.rs
+  s_f3c1b911a8127c::t_48cb4afcd05048 1-322
+src/store/history.rs
+  s_bb9527a6cd4695::t_6a6b40d0cc571d 1-144
+src/store/mod.rs
+  s_bb9527a6cd4695::t_9d979860d54c89 1-874
+src/store/sched.rs
+  s_bb9527a6cd4695::t_a5ec521875967f 1-266
+src/store/schema.sql
+  s_bb9527a6cd4695::t_6336c38dc4d4b8 1-73
+src/timing.rs
+  s_8704d9ca6bb8f1::t_c554a269fd21d4 1-65
+tests/hook.rs
+  s_f3c1b911a8127c::t_da31d56cb4e7ec 1-190
+tests/recovery.rs
+  s_f3c1b911a8127c::t_da982b46c1acc5 1-155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2db11335fb64ef7b62c33e1c285eaa7e5246d971",
+  "prompts": {},
+  "sessions": {
+    "s_8704d9ca6bb8f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dfb3ab59-8a7c-47d3-bdd2-94bd64d1013e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_f3c1b911a8127c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ebdee9d0-bc28-495b-8688-67161f172369",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
