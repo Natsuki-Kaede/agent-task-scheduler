@@ -9,21 +9,26 @@ Several AI agent sessions on one Mac can build, test and run models at the same 
 - **Less load under pressure.** When the system starts to swap, `ats` starts no new commands and gives running jobs background priority. It does not pause or stop jobs.
 - **The agent decides.** Instructions tell the model which commands to send to `ats`. Light commands run directly, so they cost nothing more.
 
-`ats` runs on macOS with Apple Silicon. It supports Claude Code and Codex.
+`ats` runs on macOS with Apple Silicon. It works with any agent that can run shell commands. The reminder hooks are for Claude Code and Codex.
 
 ## Install
+
+Give this prompt to your AI coding agent, for example Claude Code, Codex, OpenCode or Gemini CLI:
+
+```text
+Install Agent Task Scheduler (ats) for me. Read https://raw.githubusercontent.com/Natsuki-Kaede/agent-task-scheduler/main/INSTALL.md and do the steps. Ask me before you change files outside this project.
+```
+
+The agent installs the binary and shows you the changes. It writes them when you agree.
+
+To install by hand, run these commands:
 
 ```sh
 brew install natsuki-kaede/tap/ats
 ats install
 ```
 
-To build from source, install a Rust toolchain. Then run these commands:
-
-```sh
-cargo install --locked --git https://github.com/Natsuki-Kaede/agent-task-scheduler
-ats install
-```
+To build from source, install a Rust toolchain. Then use `cargo install --locked --git https://github.com/Natsuki-Kaede/agent-task-scheduler` in place of `brew install`.
 
 `ats install` shows each change as a diff. It writes nothing before you agree:
 
@@ -31,9 +36,11 @@ ats install
 - two reminder hooks in `~/.claude/settings.json` and `~/.codex/hooks.json`, which tell the agent about commands that still run or that ended;
 - a LaunchAgent that starts the daemon at login.
 
+For other agents, `ats install --service` adds only the LaunchAgent. `ats instructions` prints the instructions, which you add to the instructions file of the agent.
+
 Codex asks you to trust the changed hooks when it starts the next time.
 
-`ats uninstall` removes all of these items after the same diff and question.
+`ats uninstall` removes these items after the same diff and question.
 
 ## Use
 

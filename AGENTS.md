@@ -17,6 +17,7 @@ Agent Task Scheduler (`ats`) queues resource-heavy commands from AI agents and a
 - `src/store/`: the SQLite store and its schema.
 - `api/openapi.yaml`: the API description shared by the CLI, executors and hooks.
 - `scripts/release.sh`, `packaging/homebrew/ats.rb`: the release archive and the Homebrew formula filled in from it.
+- `INSTALL.md`: install steps written for an AI agent, which the README prompt points to.
 
 ats runs on macOS only.
 

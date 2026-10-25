@@ -17,6 +17,17 @@ use serde_json::{Value, json};
 use crate::hook::{Agent, quote};
 use crate::paths::Paths;
 
+/// How install and uninstall confirm their changes.
+pub enum Confirm<'a> {
+    /// Ask on the terminal.
+    Ask(&'a mut dyn BufRead),
+    /// Show the changes and write nothing.
+    DryRun,
+    /// Write without a question: the user agreed to the changes shown
+    /// before, as an agent shows them.
+    Yes,
+}
+
 /// The LaunchAgent's label and file name.
 const LABEL: &str = "io.github.natsuki-kaede.ats";
 const BEGIN: &str = "<!-- ats:begin -->";
@@ -224,12 +235,18 @@ fn without_block(text: &str) -> String {
 /// `text` with ats's instruction block at the end.
 fn with_block(text: &str) -> String {
     let base = without_block(text);
-    let block = format!("{BEGIN}\n{INSTRUCTIONS}\n{END}\n");
+    let block = instructions_block();
     if base.trim().is_empty() {
         block
     } else {
         format!("{}\n\n{block}", base.trim_end_matches('\n'))
     }
+}
+
+/// The instructions between markers, for an agent to add to its own
+/// instructions file and to find again for removal (`ats instructions`).
+pub fn instructions_block() -> String {
+    format!("{BEGIN}\n{INSTRUCTIONS}\n{END}\n")
 }
 
 /// `text` without the import line, or a block an earlier version wrote.
@@ -393,7 +410,7 @@ fn json_text(doc: &Value) -> String {
     serde_json::to_string_pretty(doc).expect("a JSON value") + "\n"
 }
 
-fn ask(input: &mut impl BufRead, out: &mut impl Write, question: &str) -> Result<bool> {
+fn ask(input: &mut dyn BufRead, out: &mut impl Write, question: &str) -> Result<bool> {
     write!(out, "{question} [y/N] ")?;
     out.flush()?;
     let mut line = String::new();
@@ -408,7 +425,7 @@ pub fn install(
     agents: &[Agent],
     ats: &Path,
     launchd: bool,
-    input: &mut impl BufRead,
+    confirm: Confirm,
     out: &mut impl Write,
 ) -> Result<()> {
     let mut record = Record::load(paths)?;
@@ -475,7 +492,7 @@ pub fn install(
     for note in &notes {
         writeln!(out, "Note: {note}")?;
     }
-    if apply(paths, changes, &record, input, out)? && launchd {
+    if apply(paths, changes, &record, confirm, out)? && launchd {
         launchctl(home, true, changed, out)?;
     }
     Ok(())
@@ -488,7 +505,7 @@ pub fn uninstall(
     agents: &[Agent],
     all: bool,
     launchd: bool,
-    input: &mut impl BufRead,
+    confirm: Confirm,
     out: &mut impl Write,
 ) -> Result<()> {
     let mut record = Record::load(paths)?;
@@ -539,7 +556,7 @@ pub fn uninstall(
             new: None,
         });
     }
-    if apply(paths, changes, &record, input, out)? && all && launchd {
+    if apply(paths, changes, &record, confirm, out)? && all && launchd {
         launchctl(home, false, true, out)?;
     }
     Ok(())
@@ -551,7 +568,7 @@ fn apply(
     paths: &Paths,
     changes: Vec<Change>,
     record: &Record,
-    input: &mut impl BufRead,
+    confirm: Confirm,
     out: &mut impl Write,
 ) -> Result<bool> {
     let changes: Vec<Change> = changes.into_iter().filter(|c| c.old != c.new).collect();
@@ -572,7 +589,15 @@ fn apply(
             writeln!(out, "{} will be removed.", c.path.display())?;
         }
     }
-    if !ask(input, out, "Write these changes?")? {
+    let agreed = match confirm {
+        Confirm::Ask(input) => ask(input, out, "Write these changes?")?,
+        Confirm::DryRun => {
+            writeln!(out, "Nothing written (dry run).")?;
+            return Ok(false);
+        }
+        Confirm::Yes => true,
+    };
+    if !agreed {
         writeln!(out, "Nothing written.")?;
         return Ok(false);
     }
@@ -669,7 +694,7 @@ mod tests {
         (dir, paths, home)
     }
 
-    fn run(f: impl FnOnce(&mut &[u8], &mut Vec<u8>) -> Result<()>, answers: &str) -> String {
+    fn run(f: impl FnOnce(&mut dyn BufRead, &mut Vec<u8>) -> Result<()>, answers: &str) -> String {
         let mut out = Vec::new();
         f(&mut answers.as_bytes(), &mut out).unwrap();
         String::from_utf8(out).unwrap()
@@ -694,7 +719,7 @@ mod tests {
         assert_eq!(agents, [Agent::Claude], "only the agent set up here");
 
         let shown = run(
-            |i, o| install(&paths, &home, &agents, ats, false, i, o),
+            |i, o| install(&paths, &home, &agents, ats, false, Confirm::Ask(i), o),
             "y\n",
         );
         assert!(
@@ -754,12 +779,15 @@ mod tests {
 
         // Installing again changes nothing.
         assert!(
-            run(|i, o| install(&paths, &home, &agents, ats, false, i, o), "")
-                .contains("Nothing to change.")
+            run(
+                |i, o| install(&paths, &home, &agents, ats, false, Confirm::Ask(i), o),
+                ""
+            )
+            .contains("Nothing to change.")
         );
 
         run(
-            |i, o| uninstall(&paths, &home, &agents, true, false, i, o),
+            |i, o| uninstall(&paths, &home, &agents, true, false, Confirm::Ask(i), o),
             "y\n",
         );
         assert_eq!(
@@ -808,7 +836,7 @@ mod tests {
                     &[Agent::Claude],
                     Path::new("/opt/ats"),
                     false,
-                    i,
+                    Confirm::Ask(i),
                     o,
                 )
             },
@@ -844,7 +872,7 @@ mod tests {
                     &[Agent::Claude],
                     Path::new("/opt/ats"),
                     false,
-                    i,
+                    Confirm::Ask(i),
                     o,
                 )
             },
@@ -867,7 +895,17 @@ mod tests {
         let (_dir, paths, home) = setup();
         let ats = Path::new("/Applications/My Tools/ats");
         run(
-            |i, o| install(&paths, &home, &[Agent::Codex], ats, false, i, o),
+            |i, o| {
+                install(
+                    &paths,
+                    &home,
+                    &[Agent::Codex],
+                    ats,
+                    false,
+                    Confirm::Ask(i),
+                    o,
+                )
+            },
             "y\n",
         );
         let hooks = std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
@@ -878,7 +916,17 @@ mod tests {
         let agents_md = std::fs::read_to_string(home.join(".codex/AGENTS.md")).unwrap();
         assert!(agents_md.starts_with(BEGIN) && agents_md.contains("ats run --"));
         run(
-            |i, o| uninstall(&paths, &home, &[Agent::Codex], true, false, i, o),
+            |i, o| {
+                uninstall(
+                    &paths,
+                    &home,
+                    &[Agent::Codex],
+                    true,
+                    false,
+                    Confirm::Ask(i),
+                    o,
+                )
+            },
             "y\n",
         );
         assert!(
@@ -898,11 +946,73 @@ mod tests {
             &[Agent::Claude],
             Path::new("/opt/ats"),
             false,
-            &mut "y\n".as_bytes(),
+            Confirm::Ask(&mut "y\n".as_bytes()),
             &mut out,
         )
         .unwrap_err();
         assert!(err.to_string().contains("is not valid JSON"), "{err:#}");
+    }
+
+    #[test]
+    fn an_agent_shows_the_changes_then_writes_them() {
+        let (_dir, paths, home) = setup();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let ats = Path::new("/opt/ats");
+        let mut out = Vec::new();
+        install(
+            &paths,
+            &home,
+            &[Agent::Claude],
+            ats,
+            false,
+            Confirm::DryRun,
+            &mut out,
+        )
+        .unwrap();
+        let shown = String::from_utf8(out).unwrap();
+        assert!(
+            shown.contains("+@ats.md") && shown.ends_with("Nothing written (dry run).\n"),
+            "{shown}"
+        );
+        assert!(!home.join(".claude/settings.json").exists() && !include_file(&home).exists());
+        let mut out = Vec::new();
+        install(
+            &paths,
+            &home,
+            &[Agent::Claude],
+            ats,
+            false,
+            Confirm::Yes,
+            &mut out,
+        )
+        .unwrap();
+        assert!(include_file(&home).exists() && home.join(".claude/settings.json").exists());
+    }
+
+    #[test]
+    fn the_service_alone_touches_no_agent() {
+        let (_dir, paths, home) = setup();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let mut out = Vec::new();
+        install(
+            &paths,
+            &home,
+            &[],
+            Path::new("/opt/ats"),
+            false,
+            Confirm::Yes,
+            &mut out,
+        )
+        .unwrap();
+        assert!(launch_agent(&home).exists());
+        assert!(
+            !home.join(".claude/settings.json").exists()
+                && !home.join(".claude/CLAUDE.md").exists()
+        );
+        assert!(
+            instructions_block().starts_with(BEGIN)
+                && instructions_block().ends_with(&format!("{END}\n"))
+        );
     }
 
     #[test]

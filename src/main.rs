@@ -32,6 +32,30 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+/// How install and uninstall confirm their changes.
+#[derive(clap::Args)]
+struct ConfirmArgs {
+    /// Show the changes and write nothing.
+    #[arg(long, conflicts_with = "yes")]
+    dry_run: bool,
+    /// Write the changes without a question, after the user agreed to the
+    /// changes `--dry-run` showed.
+    #[arg(long)]
+    yes: bool,
+}
+
+impl ConfirmArgs {
+    fn mode<'a>(&self, input: &'a mut dyn std::io::BufRead) -> install::Confirm<'a> {
+        if self.dry_run {
+            install::Confirm::DryRun
+        } else if self.yes {
+            install::Confirm::Yes
+        } else {
+            install::Confirm::Ask(input)
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "ats", version, about = "Agent Task Scheduler")]
 struct Cli {
@@ -109,15 +133,26 @@ enum Command {
     /// the daemon at login, after showing the changes and asking.
     Install {
         /// Only this agent; by default every agent set up on this machine.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "service")]
         agent: Vec<hook::Agent>,
+        /// Only start the daemon at login, for agents other than Claude
+        /// Code and Codex; add `ats instructions` to their instructions.
+        #[arg(long)]
+        service: bool,
+        #[command(flatten)]
+        confirm: ConfirmArgs,
     },
     /// Remove what `ats install` added and put back the hooks it moved.
     /// Without `--agent`, the daemon no longer starts at login.
     Uninstall {
         #[arg(long)]
         agent: Vec<hook::Agent>,
+        #[command(flatten)]
+        confirm: ConfirmArgs,
     },
+    /// Print the instructions that tell an agent which commands to send to
+    /// ats, between markers, for its instructions file.
+    Instructions,
     /// Answer an agent hook: the hook input on stdin, the answer on stdout.
     Hook {
         agent: hook::Agent,
@@ -224,11 +259,21 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Install { agent } => {
+        Command::Install {
+            agent,
+            service,
+            confirm,
+        } => {
             let home = dirs::home_dir().context("no home directory")?;
-            let agents = install::agents(&home, &agent);
-            if agents.is_empty() {
-                anyhow::bail!("found neither ~/.claude nor ~/.codex; name an agent with --agent");
+            let agents = if service {
+                Vec::new()
+            } else {
+                install::agents(&home, &agent)
+            };
+            if agents.is_empty() && !service {
+                anyhow::bail!(
+                    "found neither ~/.claude nor ~/.codex; name an agent with --agent, or use --service"
+                );
             }
             let ats = std::env::current_exe().context("locating the ats binary")?;
             install::install(
@@ -237,12 +282,16 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
                 &agents,
                 &ats,
                 true,
-                &mut std::io::stdin().lock(),
+                confirm.mode(&mut std::io::stdin().lock()),
                 &mut std::io::stdout(),
             )?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Uninstall { agent } => {
+        Command::Instructions => {
+            print!("{}", install::instructions_block());
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Uninstall { agent, confirm } => {
             let home = dirs::home_dir().context("no home directory")?;
             let agents = install::agents(&home, &agent);
             install::uninstall(
@@ -251,7 +300,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
                 &agents,
                 agent.is_empty(),
                 true,
-                &mut std::io::stdin().lock(),
+                confirm.mode(&mut std::io::stdin().lock()),
                 &mut std::io::stdout(),
             )?;
             Ok(ExitCode::SUCCESS)
