@@ -1,0 +1,21 @@
+README.zh-CN.md
+  s_8704d9ca6bb8f1::t_eb4fd75d47403e 1-90
+README.md
+  s_8704d9ca6bb8f1::t_bf657c7f84bb09 3-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "76eea62622b8e55cf6673acd70480a9546391ba4",
+  "prompts": {},
+  "sessions": {
+    "s_8704d9ca6bb8f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dfb3ab59-8a7c-47d3-bdd2-94bd64d1013e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
