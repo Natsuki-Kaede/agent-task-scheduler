@@ -10,16 +10,17 @@ Agent Task Scheduler (`ats`) queues resource-heavy commands from AI agents and a
 - `src/client.rs`: how commands reach the daemon.
 - `src/executor/`: the per-job process that waits for its lease and runs the command.
 - `src/hook.rs`: the agent hooks, which remind agents of their submissions.
-- `src/install.rs`: `ats install` and `ats uninstall` for the agents' instructions, reminder hooks and the LaunchAgent.
+- `src/install/`: `ats install` and `ats uninstall` for the agents' instructions, reminder hooks and the login service (`service.rs`: LaunchAgent or systemd user unit).
 - `src/recognize/`, `src/profile.rs`, `profiles/builtin.toml`: command recognition and tool profiles.
 - `src/sched/`: admission, prediction, locks and pressure as pure functions.
 - `src/sample/`: memory measurement.
 - `src/store/`: the SQLite store and its schema.
 - `api/openapi.yaml`: the API description shared by the CLI, executors and hooks.
-- `scripts/release.sh`, `packaging/homebrew/ats.rb`: the release archive and the Homebrew formula filled in from it.
+- `scripts/release.sh`, `scripts/formula.sh`, `packaging/homebrew/ats.rb`: the release archive of one target, and the checksums and Homebrew formula filled in from all archives.
+- `.github/workflows/`: checks on Linux and macOS, Arm and x86; release builds for the four targets.
 - `INSTALL.md`: install steps written for an AI agent, which the README prompt points to.
 
-ats runs on macOS only.
+ats runs on macOS and Linux. The code for each system is in `src/sample/{macos,linux}.rs`, `src/procinfo.rs`, `src/control.rs`, `src/timing.rs` and `src/install/service.rs`. Other code uses only POSIX calls.
 
 ## Code
 

@@ -1,6 +1,6 @@
 //! `ats install` and `ats uninstall` (design 5.3, 6.1, 12): the
 //! instructions that tell agents which commands to send to `ats run`, the
-//! reminder hooks, and the LaunchAgent that keeps the daemon running.
+//! reminder hooks, and the login service that keeps the daemon running.
 //! Every change is shown as a diff and written only after confirmation,
 //! with a backup of each file first. Earlier versions moved other hooks
 //! into a chain of their own and kept them in `installed.json`; install and
@@ -17,6 +17,8 @@ use serde_json::{Value, json};
 use crate::hook::{Agent, quote};
 use crate::paths::Paths;
 
+mod service;
+
 /// How install and uninstall confirm their changes.
 pub enum Confirm<'a> {
     /// Ask on the terminal.
@@ -28,8 +30,6 @@ pub enum Confirm<'a> {
     Yes,
 }
 
-/// The LaunchAgent's label and file name.
-const LABEL: &str = "io.github.natsuki-kaede.ats";
 const BEGIN: &str = "<!-- ats:begin -->";
 const END: &str = "<!-- ats:end -->";
 /// The line in CLAUDE.md that imports the instructions file.
@@ -274,102 +274,6 @@ fn with_include(text: &str) -> String {
     }
 }
 
-fn launch_agent(home: &Path) -> PathBuf {
-    home.join("Library/LaunchAgents")
-        .join(format!("{LABEL}.plist"))
-}
-
-fn xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-/// Starts `ats daemon` at login and again if it fails. A data directory
-/// chosen with `ATS_HOME` is passed on.
-fn plist(paths: &Paths, ats: &Path) -> String {
-    let env = match std::env::var_os(crate::paths::HOME_ENV) {
-        Some(_) => format!(
-            "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>{}</key>\n    <string>{}</string>\n  </dict>\n",
-            crate::paths::HOME_ENV,
-            xml(&paths.home.to_string_lossy())
-        ),
-        None => String::new(),
-    };
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>{LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>{}</string>
-    <string>daemon</string>
-  </array>
-{env}  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
-  <key>StandardErrorPath</key>
-  <string>{}</string>
-</dict>
-</plist>
-"#,
-        xml(&ats.to_string_lossy()),
-        xml(&paths.home.join("daemon.log").to_string_lossy())
-    )
-}
-
-fn loaded(target: &str) -> bool {
-    std::process::Command::new("launchctl")
-        .args(["print", target])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-/// Loads or unloads the LaunchAgent in this user's session. A loaded
-/// agent is reloaded only when `changed`: reloading restarts the daemon.
-fn launchctl(home: &Path, load: bool, changed: bool, out: &mut impl Write) -> Result<()> {
-    // SAFETY: getuid cannot fail.
-    let domain = format!("gui/{}", unsafe { libc::getuid() });
-    let target = format!("{domain}/{LABEL}");
-    if load && !changed && loaded(&target) {
-        return Ok(());
-    }
-    if loaded(&target) {
-        let _ = std::process::Command::new("launchctl")
-            .args(["bootout", &target])
-            .status();
-        // launchd can still hold the agent when bootout returns, and a
-        // bootstrap then fails.
-        for _ in 0..50 {
-            if !loaded(&target) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
-    if load {
-        let status = std::process::Command::new("launchctl")
-            .args(["bootstrap", &domain])
-            .arg(launch_agent(home))
-            .status()
-            .context("running launchctl")?;
-        if !status.success() {
-            bail!("launchctl bootstrap failed: {status}");
-        }
-        writeln!(out, "The daemon now runs at login: {LABEL}")?;
-    }
-    Ok(())
-}
-
 /// In Claude Code modes that ask before shell commands, each `ats run`
 /// asks too. An allow rule for `ats run` would allow any command.
 fn claude_asks(doc: &Value) -> bool {
@@ -418,13 +322,13 @@ fn ask(input: &mut dyn BufRead, out: &mut impl Write, question: &str) -> Result<
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-/// `launchd` loads the LaunchAgent once it is written.
+/// With `start`, the login service is loaded once it is written.
 pub fn install(
     paths: &Paths,
     home: &Path,
     agents: &[Agent],
     ats: &Path,
-    launchd: bool,
+    start: bool,
     confirm: Confirm,
     out: &mut impl Write,
 ) -> Result<()> {
@@ -477,8 +381,8 @@ pub fn install(
             old,
         });
     }
-    let service = launch_agent(home);
-    let (old, new) = (read(&service)?, plist(paths, ats));
+    let service = service::file(home);
+    let (old, new) = (read(&service)?, service::text(paths, ats));
     let changed = old.as_deref() != Some(new.as_str());
     changes.push(Change {
         old,
@@ -492,19 +396,23 @@ pub fn install(
     for note in &notes {
         writeln!(out, "Note: {note}")?;
     }
-    if apply(paths, changes, &record, confirm, out)? && launchd {
-        launchctl(home, true, changed, out)?;
+    if let Some(changes) = review(changes, confirm, out)? {
+        write(paths, &changes, &record, out)?;
+        if start {
+            service::load(home, changed, out)?;
+        }
     }
     Ok(())
 }
 
-/// With `all`, the LaunchAgent goes too; `launchd` unloads it.
+/// With `all`, the login service goes too; with `start`, it is unloaded
+/// first.
 pub fn uninstall(
     paths: &Paths,
     home: &Path,
     agents: &[Agent],
     all: bool,
-    launchd: bool,
+    start: bool,
     confirm: Confirm,
     out: &mut impl Write,
 ) -> Result<()> {
@@ -548,7 +456,7 @@ pub fn uninstall(
             }
         }
     }
-    let service = launch_agent(home);
+    let service = service::file(home);
     if all && let Some(old) = read(&service)? {
         changes.push(Change {
             path: service,
@@ -556,25 +464,26 @@ pub fn uninstall(
             new: None,
         });
     }
-    if apply(paths, changes, &record, confirm, out)? && all && launchd {
-        launchctl(home, false, true, out)?;
+    if let Some(changes) = review(changes, confirm, out)? {
+        if all && start {
+            service::unload(home)?;
+        }
+        write(paths, &changes, &record, out)?;
     }
     Ok(())
 }
 
-/// Shows the changes, asks once, then backs up and writes each file and
-/// the record. Returns whether anything was written.
-fn apply(
-    paths: &Paths,
+/// Shows the changes and asks once. Returns the changes to write, if the
+/// user agreed.
+fn review(
     changes: Vec<Change>,
-    record: &Record,
     confirm: Confirm,
     out: &mut impl Write,
-) -> Result<bool> {
+) -> Result<Option<Vec<Change>>> {
     let changes: Vec<Change> = changes.into_iter().filter(|c| c.old != c.new).collect();
     if changes.is_empty() {
         writeln!(out, "Nothing to change.")?;
-        return Ok(false);
+        return Ok(None);
     }
     for c in &changes {
         out.write_all(
@@ -593,14 +502,19 @@ fn apply(
         Confirm::Ask(input) => ask(input, out, "Write these changes?")?,
         Confirm::DryRun => {
             writeln!(out, "Nothing written (dry run).")?;
-            return Ok(false);
+            return Ok(None);
         }
         Confirm::Yes => true,
     };
     if !agreed {
         writeln!(out, "Nothing written.")?;
-        return Ok(false);
+        return Ok(None);
     }
+    Ok(Some(changes))
+}
+
+/// Backs up and writes each file, then the record.
+fn write(paths: &Paths, changes: &[Change], record: &Record, out: &mut impl Write) -> Result<()> {
     let backup = paths
         .home
         .join("backups")
@@ -630,7 +544,7 @@ fn apply(
     } else {
         writeln!(out, "Written.")?;
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Replaces `path` through a temporary file, keeping its permissions.
@@ -726,21 +640,10 @@ mod tests {
             shown.contains("asks before each `ats run`"),
             "default mode: {shown}"
         );
-        let service = launch_agent(&home);
-        let lint = std::process::Command::new("plutil")
-            .arg("-lint")
-            .arg(&service)
-            .output()
-            .unwrap();
         assert!(
-            lint.status.success(),
-            "{}",
-            String::from_utf8_lossy(&lint.stdout)
-        );
-        assert!(
-            std::fs::read_to_string(&service)
+            std::fs::read_to_string(service::file(&home))
                 .unwrap()
-                .contains("<string>/opt/ats</string>")
+                .contains("/opt/ats")
         );
         let doc = read_json(&settings);
         let keys: Vec<&String> = doc.as_object().unwrap().keys().collect();
@@ -799,7 +702,7 @@ mod tests {
             std::fs::read_to_string(&instructions).unwrap(),
             "# Mine\n\nKeep this.\n"
         );
-        assert!(!include_file(&home).exists() && !service.exists());
+        assert!(!include_file(&home).exists() && !service::file(&home).exists());
     }
 
     fn read_json_str(text: &str) -> Value {
@@ -1004,7 +907,7 @@ mod tests {
             &mut out,
         )
         .unwrap();
-        assert!(launch_agent(&home).exists());
+        assert!(service::file(&home).exists());
         assert!(
             !home.join(".claude/settings.json").exists()
                 && !home.join(".claude/CLAUDE.md").exists()

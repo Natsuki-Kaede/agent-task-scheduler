@@ -3,7 +3,12 @@
 
 use std::time::Duration;
 
-// CLOCK_MONOTONIC keeps counting during sleep on macOS.
+// macOS CLOCK_MONOTONIC counts sleep; Linux needs CLOCK_BOOTTIME for that.
+#[cfg(target_os = "macos")]
+const CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+#[cfg(target_os = "linux")]
+const CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
+
 fn read(clock: libc::clockid_t) -> Duration {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -17,7 +22,7 @@ fn read(clock: libc::clockid_t) -> Duration {
 
 /// Time since boot, including sleep.
 pub fn elapsed() -> Duration {
-    read(libc::CLOCK_MONOTONIC)
+    read(CLOCK)
 }
 
 /// A point in time measured on the elapsed clock.

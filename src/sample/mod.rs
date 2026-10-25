@@ -1,9 +1,17 @@
 //! Measurement (design 9): system memory and swap-out rate every second,
-//! and each job's private anonymous memory from region walks, which cost a
-//! few milliseconds per process and run every five seconds and for new
-//! processes.
+//! and each job's private anonymous memory. Per-process readings cost up to
+//! a few milliseconds (a region walk on macOS) and run every five seconds
+//! and for new processes.
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
 mod macos;
+
+#[cfg(target_os = "linux")]
+use linux as os;
+#[cfg(target_os = "macos")]
+use macos as os;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
@@ -13,7 +21,7 @@ use serde::Serialize;
 use crate::procinfo::{self, Proc};
 use crate::timing;
 
-pub use macos::system;
+pub use os::system;
 
 /// Whole-machine readings.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -21,10 +29,11 @@ pub struct System {
     pub mem_total: u64,
     /// Memory in use, as the system counts it (U in design 10.1).
     pub mem_used: u64,
-    /// The system's own pressure level: 1 normal, 2 warning, 4 critical.
+    /// The system's own pressure level: 1 normal, 4 critical (macOS also
+    /// reports 2, warning).
     pub pressure: u8,
-    /// Pages swapped out since boot.
-    pub swap_outs: u64,
+    /// Bytes swapped out since boot.
+    pub swap_out_bytes: u64,
     pub cores: u32,
 }
 
@@ -52,8 +61,8 @@ pub struct JobUsage {
 pub struct Snapshot {
     pub at: String,
     pub system: Option<System>,
-    /// Pages swapped out per second since the previous sample.
-    pub swap_outs: f64,
+    /// Bytes swapped out per second since the previous sample.
+    pub swap_out_rate: f64,
     pub jobs: BTreeMap<String, JobUsage>,
 }
 
@@ -96,7 +105,13 @@ pub fn attribute(procs: &[Proc], jobs: &[JobRoot]) -> BTreeMap<String, Vec<i32>>
     out
 }
 
-/// Region walks run this often; new processes are walked at once.
+/// Cores this process may use: the CPU affinity mask and, on Linux, the
+/// cgroup CPU quota count.
+fn cores() -> u32 {
+    std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
+}
+
+/// Per-process memory is read this often; new processes are read at once.
 const MEMORY_EVERY: u64 = 5;
 
 type Key = (i32, String);
@@ -115,15 +130,15 @@ impl Sampler {
     pub fn sample(&mut self, jobs: &[JobRoot]) -> Snapshot {
         let system = system();
         let now = timing::elapsed();
-        let mut swap_outs = 0.0;
+        let mut swap_out_rate = 0.0;
         if let Some(s) = &system {
             if let Some((before, at)) = self.last {
                 let secs = now.saturating_sub(at).as_secs_f64();
                 if secs > 0.0 {
-                    swap_outs = s.swap_outs.saturating_sub(before) as f64 / secs;
+                    swap_out_rate = s.swap_out_bytes.saturating_sub(before) as f64 / secs;
                 }
             }
-            self.last = Some((s.swap_outs, now));
+            self.last = Some((s.swap_out_bytes, now));
         }
 
         let procs = procinfo::list();
@@ -136,7 +151,7 @@ impl Sampler {
         let mut snapshot = Snapshot {
             at: crate::store::now(),
             system,
-            swap_outs,
+            swap_out_rate,
             jobs: BTreeMap::new(),
         };
         for (job, pids) in attribute(&procs, jobs) {
@@ -150,7 +165,7 @@ impl Sampler {
                     starts.get(&pid).copied().unwrap_or_default().to_string(),
                 );
                 if (walk_all || !self.memory.contains_key(&key))
-                    && let Some(m) = macos::memory(pid)
+                    && let Some(m) = os::memory(pid)
                 {
                     self.memory.insert(key.clone(), m);
                 }

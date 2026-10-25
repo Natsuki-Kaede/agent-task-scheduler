@@ -53,8 +53,8 @@ pub fn system() -> Option<System> {
         // Activity Monitor's "memory used": app memory, wired and compressed.
         mem_used: pages(app + vm.wire_count as u64 + vm.compressor_page_count as u64),
         pressure: sysctl::<i32>("kern.memorystatus_vm_pressure_level").unwrap_or(0) as u8,
-        swap_outs: vm.swapouts,
-        cores: sysctl::<i32>("hw.ncpu").unwrap_or(1).max(1) as u32,
+        swap_out_bytes: pages(vm.swapouts),
+        cores: super::cores(),
     })
 }
 

@@ -344,9 +344,9 @@ paths:
       summary: Memory pressure and where memory goes
       description: |
         Pressure is up while the swap-out rate, averaged over 10 seconds, is
-        at or above 64 pages a second or the system reports critical
-        pressure, and for 30 seconds after. While it is up nothing new is
-        admitted and running jobs are on background QoS.
+        at or above 4 MiB a second or the system reports critical pressure,
+        and for 30 seconds after. While it is up nothing new is admitted, and
+        on macOS running jobs are on background QoS.
       responses:
         '200':
           description: OK
@@ -356,8 +356,8 @@ paths:
                 type: object
                 properties:
                   pressured: { type: boolean }
-                  swap_outs: { type: number, description: Pages per second, averaged over 10 seconds }
-                  system_level: { type: integer, description: '1 normal, 2 warning, 4 critical' }
+                  swap_out_rate: { type: number, description: Bytes per second, averaged over 10 seconds }
+                  system_level: { type: integer, description: '1 normal, 2 warning (macOS only), 4 critical' }
                   managed: { type: integer, description: Private memory resident in managed jobs, in bytes }
                   unmanaged: { type: integer, description: Memory in use by everything else, in bytes }
 
@@ -471,10 +471,10 @@ components:
           properties:
             mem_total: { type: integer }
             mem_used: { type: integer }
-            pressure: { type: integer, description: '1 normal, 2 warning, 4 critical' }
-            swap_outs: { type: integer, description: Pages swapped out since boot }
+            pressure: { type: integer, description: '1 normal, 2 warning (macOS only), 4 critical' }
+            swap_out_bytes: { type: integer, description: Bytes swapped out since boot }
             cores: { type: integer }
-        swap_outs: { type: number, description: Pages swapped out per second since the previous sample }
+        swap_out_rate: { type: number, description: Bytes swapped out per second since the previous sample }
         jobs: { type: object, additionalProperties: { $ref: '#/components/schemas/JobUsage' } }
 
     Reminder:

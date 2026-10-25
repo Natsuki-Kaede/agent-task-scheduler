@@ -48,7 +48,7 @@ fn attributes_trees_and_groups() {
 fn samples_a_running_child() {
     let mut sampler = Sampler::default();
     // A child that holds 64 MB of private memory.
-    let mut child = std::process::Command::new("/usr/bin/perl")
+    let mut child = std::process::Command::new("perl")
         .args(["-e", "$x = 'a' x (64 << 20); sleep 5"])
         .spawn()
         .unwrap();

@@ -1,15 +1,32 @@
-# Homebrew formula for the tap. scripts/release.sh fills in the version
-# and checksum of the release archive.
+# Homebrew formula for the tap. scripts/formula.sh fills in the version
+# and the checksums of the release archives.
 class Ats < Formula
   desc "Queues resource-heavy commands from AI agents and starts them by available memory"
   homepage "https://github.com/Natsuki-Kaede/agent-task-scheduler"
-  url "https://github.com/Natsuki-Kaede/agent-task-scheduler/releases/download/v@VERSION@/ats-@VERSION@-aarch64-apple-darwin.tar.gz"
   version "@VERSION@"
-  sha256 "@SHA256@"
   license "GPL-3.0-only"
 
-  depends_on arch: :arm64
-  depends_on :macos
+  on_macos do
+    on_arm do
+      url "https://github.com/Natsuki-Kaede/agent-task-scheduler/releases/download/v@VERSION@/ats-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA256_aarch64-apple-darwin@"
+    end
+    on_intel do
+      url "https://github.com/Natsuki-Kaede/agent-task-scheduler/releases/download/v@VERSION@/ats-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA256_x86_64-apple-darwin@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/Natsuki-Kaede/agent-task-scheduler/releases/download/v@VERSION@/ats-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256_aarch64-unknown-linux-musl@"
+    end
+    on_intel do
+      url "https://github.com/Natsuki-Kaede/agent-task-scheduler/releases/download/v@VERSION@/ats-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256_x86_64-unknown-linux-musl@"
+    end
+  end
 
   def install
     bin.install "ats"

@@ -1,15 +1,15 @@
 # Agent Task Scheduler (ats)
 
-Several AI agent sessions on one Mac can build, test and run models at the same time. Each session works as if it has the machine for itself. Then memory runs out, the system swaps, and all commands become slow until they time out.
+Several AI agent sessions on one computer can build, test and run models at the same time. Each session works as if it has the machine for itself. Then memory runs out, the system swaps, and all commands become slow until they time out.
 
 `ats` is a local queue for heavy shell commands. An agent sends a heavy command to `ats run`. A daemon starts the command when the machine has memory for it, and tells the command how many parallel jobs to use. The command runs in the environment of the agent. Its output and exit code come back unchanged.
 
 - **Admission by memory.** A command starts when its predicted peak memory fits in the free memory. CPU stays with the operating system. `ats` only sets the parallelism of each job.
 - **Predictions from use.** Each run records its measured memory peak and duration. The next run of the same command uses these values.
-- **Less load under pressure.** When the system starts to swap, `ats` starts no new commands and gives running jobs background priority. It does not pause or stop jobs.
+- **Less load under pressure.** When the system starts to swap, `ats` starts no new commands. On macOS, it also gives running jobs background priority. It does not pause or stop jobs.
 - **The agent decides.** Instructions tell the model which commands to send to `ats`. Light commands run directly, so they cost nothing more.
 
-`ats` runs on macOS with Apple Silicon. It works with any agent that can run shell commands. The reminder hooks are for Claude Code and Codex.
+`ats` runs on macOS and Linux, on 64-bit Arm and x86. It works with any agent that can run shell commands. The reminder hooks are for Claude Code and Codex.
 
 ## Install
 
@@ -28,15 +28,15 @@ brew install natsuki-kaede/tap/ats
 ats install
 ```
 
-To build from source, install a Rust toolchain. Then use `cargo install --locked --git https://github.com/Natsuki-Kaede/agent-task-scheduler` in place of `brew install`.
+Homebrew works on macOS and Linux. Without Homebrew, download the archive for your machine from the [releases](https://github.com/Natsuki-Kaede/agent-task-scheduler/releases), or install a Rust toolchain and use `cargo install --locked --git https://github.com/Natsuki-Kaede/agent-task-scheduler`.
 
 `ats install` shows each change as a diff. It writes nothing before you agree:
 
 - instructions for the model: `~/.claude/ats.md` with an `@ats.md` line in `~/.claude/CLAUDE.md`, and a section in `~/.codex/AGENTS.md`;
 - two reminder hooks in `~/.claude/settings.json` and `~/.codex/hooks.json`, which tell the agent about commands that still run or that ended;
-- a LaunchAgent that starts the daemon at login.
+- a login service that starts the daemon: a LaunchAgent on macOS, a systemd user unit on Linux.
 
-For other agents, `ats install --service` adds only the LaunchAgent. `ats instructions` prints the instructions, which you add to the instructions file of the agent.
+For other agents, `ats install --service` adds only the login service. `ats instructions` prints the instructions, which you add to the instructions file of the agent.
 
 Codex asks you to trust the changed hooks when it starts the next time.
 
@@ -70,7 +70,7 @@ In Claude Code permission modes that ask before shell commands, each `ats run` a
 
 ## Configuration
 
-The files are in `~/Library/Application Support/ats/`.
+The files are in `~/Library/Application Support/ats/` on macOS and in `~/.local/share/ats/` on Linux.
 
 `config.toml` lists programs that run the rest of their arguments as a command. With this list, `ats` recognizes the command in them:
 

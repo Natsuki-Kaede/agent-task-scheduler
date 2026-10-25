@@ -275,14 +275,16 @@ async fn run_command(
 }
 
 /// The end report, with the largest resident size of any process the
-/// command waited for (bytes on macOS): sampling misses commands shorter
-/// than its interval (design 8.3).
+/// command waited for, in bytes: sampling misses commands shorter than its
+/// interval (design 8.3).
 fn ended(state: &str, exit_code: Option<i64>) -> serde_json::Value {
     // SAFETY: getrusage fills the struct.
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
     // SAFETY: as above.
     unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) };
-    json!({ "state": state, "exit_code": exit_code, "max_rss": ru.ru_maxrss })
+    // macOS reports bytes, Linux kilobytes.
+    let unit = if cfg!(target_os = "linux") { 1024 } else { 1 };
+    json!({ "state": state, "exit_code": exit_code, "max_rss": ru.ru_maxrss * unit })
 }
 
 /// Polls the daemon until the job is canceled.

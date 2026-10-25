@@ -26,9 +26,9 @@ impl Response {
             return;
         };
         let now = timing::elapsed().as_secs_f64();
-        let (swap_outs, pressured) = self
-            .tracker
-            .update(snapshot.swap_outs, system.pressure, now);
+        let (swap_out_rate, pressured) =
+            self.tracker
+                .update(snapshot.swap_out_rate, system.pressure, now);
         let was = state.pressure.lock().expect("pressure lock").pressured;
         if pressured {
             for pid in snapshot.jobs.values().flat_map(|u| &u.processes) {
@@ -49,7 +49,7 @@ impl Response {
         if pressured != was {
             tracing::warn!(
                 pressured,
-                swap_outs,
+                swap_out_rate,
                 system_level = system.pressure,
                 "memory pressure"
             );
@@ -57,7 +57,7 @@ impl Response {
         let managed: u64 = snapshot.jobs.values().map(|u| u.private_resident).sum();
         *state.pressure.lock().expect("pressure lock") = PressureStatus {
             pressured,
-            swap_outs,
+            swap_out_rate,
             system_level: system.pressure,
             managed,
             unmanaged: system.mem_used.saturating_sub(managed),

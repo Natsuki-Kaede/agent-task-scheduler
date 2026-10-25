@@ -1,8 +1,8 @@
 //! `ats`: Agent Task Scheduler. Queues resource-heavy commands from AI agents
 //! and admits them by machine capacity.
 
-#[cfg(not(target_os = "macos"))]
-compile_error!("ats supports macOS only");
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("ats supports macOS and Linux");
 
 mod api;
 mod channel;
@@ -201,7 +201,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Daemon => {
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
-                // The LaunchAgent sends stderr to a file.
+                // The login service sends stderr to a file or the journal.
                 .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
                 .init();
             daemon::run(paths, daemon::shutdown_signal()).await?;

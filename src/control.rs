@@ -1,9 +1,22 @@
-//! Background QoS (design 10.2): lower CPU priority, the efficiency cores
-//! and lower disk priority. The same user can undo it; the system cannot
-//! report it, so the caller keeps track of what it set.
+//! Background QoS (design 10.2) on macOS: lower CPU priority, the
+//! efficiency cores and lower disk priority. The same user can undo it; the
+//! system cannot report it, so the caller keeps track of what it set.
+//!
+//! Linux has no equivalent: a user without privileges cannot raise a
+//! priority again after lowering it, so jobs keep their priority.
 
 /// Moves a process to or from background QoS. Children started afterwards
-/// inherit it. Returns false when the process is gone.
+/// inherit it. Returns false when the process is gone or the system has no
+/// background QoS.
+#[cfg(target_os = "linux")]
+pub fn set_background(_pid: i32, _on: bool) -> bool {
+    false
+}
+
+/// Moves a process to or from background QoS. Children started afterwards
+/// inherit it. Returns false when the process is gone or the system has no
+/// background QoS.
+#[cfg(target_os = "macos")]
 pub fn set_background(pid: i32, on: bool) -> bool {
     const PRIO_DARWIN_PROCESS: i32 = 4;
     const PRIO_DARWIN_BG: i32 = 0x1000;
@@ -17,7 +30,7 @@ pub fn set_background(pid: i32, on: bool) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

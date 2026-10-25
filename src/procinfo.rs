@@ -41,6 +41,37 @@ pub fn list() -> Vec<Proc> {
     imp::all_pids().into_iter().filter_map(imp::proc).collect()
 }
 
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::Proc;
+
+    /// Reads `/proc/<pid>/stat`. The start time is in clock ticks since boot.
+    pub fn proc(pid: i32) -> Option<Proc> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // The command name in parentheses can hold spaces and parentheses.
+        let fields: Vec<&str> = stat
+            .get(stat.rfind(')')? + 1..)?
+            .split_whitespace()
+            .collect();
+        // Fields 4, 5 and 22 of proc(5), counted from the state (field 3).
+        Some(Proc {
+            pid,
+            ppid: fields.get(1)?.parse().ok()?,
+            pgid: fields.get(2)?.parse().ok()?,
+            start: fields.get(19)?.to_string(),
+        })
+    }
+
+    pub fn all_pids() -> Vec<i32> {
+        std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+            .collect()
+    }
+}
+
+#[cfg(target_os = "macos")]
 mod imp {
     use std::mem::{MaybeUninit, size_of};
 
@@ -96,7 +127,7 @@ mod tests {
         let me = std::process::id() as i32;
         let start = start_time(me).unwrap();
         assert!(alive(me, &start));
-        assert!(!alive(me, "0.000000"));
+        assert!(!alive(me, "0"));
 
         let mut child = std::process::Command::new("sleep")
             .arg("5")
