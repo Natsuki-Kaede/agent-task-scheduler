@@ -1,0 +1,19 @@
+.gitignore
+  s_bb9527a6cd4695::t_eaeab97bb21b44 1-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a5be4acc2dd7c6a9d32c0f49b8693b562bc2940f",
+  "prompts": {},
+  "sessions": {
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
