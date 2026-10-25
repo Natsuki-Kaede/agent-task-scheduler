@@ -1,0 +1,33 @@
+AGENTS.md
+  s_8704d9ca6bb8f1::t_3801c30d0a1d49 1-40
+INSTALL.md
+  s_8704d9ca6bb8f1::t_9a761aa6c1429b 1-77
+LICENSE
+  s_bb9527a6cd4695::t_041977f6f21411 1-674
+README.md
+  s_8704d9ca6bb8f1::t_d301de46bfaac0 1-88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f559bbce4c4b198acb0bf75acbc71fa5bd7baa27",
+  "prompts": {},
+  "sessions": {
+    "s_8704d9ca6bb8f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dfb3ab59-8a7c-47d3-bdd2-94bd64d1013e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    },
+    "s_bb9527a6cd4695": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73dc8c1c-fe06-423f-8555-329d41d1bece",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
