@@ -1,0 +1,27 @@
+src/daemon/scheduler.rs
+  s_f3c1b911a8127c::t_9af38ff02c1165 24,31-32,122-124
+  s_f3c1b911a8127c::t_854e5682fe6664 204,222,230-231,234,237,241-242,250,252-253,255,261,270,276,279
+src/sched/pressure.rs
+  s_f3c1b911a8127c::t_6a5ce66cf79bbf 61
+  s_f3c1b911a8127c::t_9af38ff02c1165 12,65,68,70
+src/sched/tests.rs
+  s_f3c1b911a8127c::t_0e04927085f4ee 79,93-96,153,164,231
+api/openapi.yaml
+  s_f3c1b911a8127c::t_9af38ff02c1165 444
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1881c34f15c1e3893be572417c3d5f7438383ae2",
+  "prompts": {},
+  "sessions": {
+    "s_f3c1b911a8127c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ebdee9d0-bc28-495b-8688-67161f172369",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
