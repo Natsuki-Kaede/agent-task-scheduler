@@ -1,0 +1,56 @@
+src/paths.rs
+  s_cc8e1cb16de542::t_7f4c79e94b8ced 25-26,46-48,73-91,94
+  s_cc8e1cb16de542::t_d53e1207069e63 57-60
+  s_cc8e1cb16de542::t_1f67112227186c 92-93
+src/redact.rs
+  s_cc8e1cb16de542::t_3af844f4fe2aa8 51-53,55-58,90-93,126-134
+  s_cc8e1cb16de542::t_d53e1207069e63 94-125
+Cargo.toml
+  s_cc8e1cb16de542::t_3af844f4fe2aa8 28
+  s_cc8e1cb16de542::t_83f2365a120419 3
+src/daemon/mod.rs
+  s_cc8e1cb16de542::t_7f4c79e94b8ced 37
+src/main.rs
+  s_cc8e1cb16de542::t_3af844f4fe2aa8 227-228
+  s_cc8e1cb16de542::t_d53e1207069e63 230-232
+  s_cc8e1cb16de542::t_7f4c79e94b8ced 229,233
+  s_cc8e1cb16de542::t_48e3f5b35b8ad7 332,334
+api/openapi.yaml
+  s_cc8e1cb16de542::t_83f2365a120419 4
+  s_cc8e1cb16de542::t_3af844f4fe2aa8 154
+src/cli.rs
+  s_cc8e1cb16de542::t_7f4c79e94b8ced 209
+tests/recovery.rs
+  s_cc8e1cb16de542::t_48e3f5b35b8ad7 193
+  s_cc8e1cb16de542::t_a300e6328e844f 171,177
+  s_cc8e1cb16de542::t_d53e1207069e63 108-111,117-119,123-126
+  s_cc8e1cb16de542::t_e08cc3b710cec6 85-91,103-107,112-116,120-122,127-130
+  s_cc8e1cb16de542::t_871e4c41cc4092 172-175
+  s_cc8e1cb16de542::t_ccecb6d151c117 131
+tests/hook.rs
+  s_cc8e1cb16de542::t_1ca8d0cfb7ac64 12-13
+src/executor/mod.rs
+  s_cc8e1cb16de542::t_e08cc3b710cec6 502-515,520-525,532-539,544-545,549-558,572-573,581-583,592-598,602-603
+  s_cc8e1cb16de542::t_871e4c41cc4092 440-450,455-459
+  s_cc8e1cb16de542::t_48e3f5b35b8ad7 102,178-195,201-205,231-232,235,254-268,280,337,345,358-359,604
+  s_cc8e1cb16de542::t_a300e6328e844f 438-439,451-454,460
+  s_cc8e1cb16de542::t_d53e1207069e63 157-158,338,516-519,526-531,540-543,559-571,574-580,584-591,599-601
+Cargo.lock
+  s_cc8e1cb16de542::t_64640bcf511a8b 7,23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9a98b45aa0e4e8883c0677c0f4fc7dbeda599ceb",
+  "prompts": {},
+  "sessions": {
+    "s_cc8e1cb16de542": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a185a3-e440-7aa1-bee6-6efb1914131c",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Natsuki-Kaede <i@pari.network>"
+    }
+  }
+}
