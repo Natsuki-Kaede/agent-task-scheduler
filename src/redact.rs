@@ -48,11 +48,14 @@ pub fn command_words(words: &[String]) -> Vec<String> {
     out
 }
 
-/// Redacts a shell source line by applying [`command_words`] to its
-/// whitespace-separated words. The result is for display only.
+/// Redacts complete shell words, including quoted and escaped whitespace.
+/// Unclosed quotes have no reliable word boundary, so none of that source
+/// is stored. The result is for display only.
 pub fn shell_source(source: &str) -> String {
-    let words: Vec<String> = source.split_whitespace().map(str::to_string).collect();
-    command_words(&words).join(" ")
+    match shlex::split(source) {
+        Some(words) => command_words(&words).join(" "),
+        None => "[redacted: unparsed shell source]".into(),
+    }
 }
 
 #[cfg(test)]
@@ -83,5 +86,50 @@ mod tests {
         for (input, want) in cases {
             assert_eq!(command_words(&w(input)).join(" "), want, "{input}");
         }
+    }
+
+    #[test]
+    fn redacts_quoted_and_escaped_values_as_complete_words() {
+        let cases = [
+            (
+                "API_TOKEN='alpha beta' ./build.sh",
+                "API_TOKEN=[redacted] ./build.sh",
+            ),
+            (
+                "tool --password 'first second' run",
+                "tool --password [redacted] run",
+            ),
+            (
+                "tool --password=\"first second\" run",
+                "tool --password=[redacted] run",
+            ),
+            (
+                r"tool --password first\ second run",
+                "tool --password [redacted] run",
+            ),
+            (
+                "tool '--password' 'first second' run",
+                "tool --password [redacted] run",
+            ),
+            (
+                "API_TOKEN='alpha\nbeta' ./build.sh",
+                "API_TOKEN=[redacted] ./build.sh",
+            ),
+            (
+                r"tool --password 'first'\'' second' run",
+                "tool --password [redacted] run",
+            ),
+            (
+                "tool --password 'unfinished value",
+                "[redacted: unparsed shell source]",
+            ),
+        ];
+        for (source, want) in cases {
+            assert_eq!(shell_source(source), want, "{source}");
+        }
+        assert_eq!(
+            command_words(&["tool".into(), "--password".into(), "first second".into()]),
+            ["tool", "--password", "[redacted]"]
+        );
     }
 }

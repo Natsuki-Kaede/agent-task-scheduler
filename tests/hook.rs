@@ -9,6 +9,8 @@ fn ats(home: &std::path::Path, args: &[&str], stdin: &str, env: &[(&str, &str)])
         .env("ATS_HOME", home)
         // Tests may themselves run inside an ats job.
         .env_remove("ATS_JOB_ID")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -82,7 +82,13 @@ fn wait_until(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {
 
 /// Submits without waiting and returns the submission and job ids.
 fn submit(home: &Home, source: &str) -> (String, String) {
-    let out = home.ats(&["run", "--no-wait", "--sh", source]);
+    submit_with_options(home, source, &[])
+}
+
+fn submit_with_options(home: &Home, source: &str, options: &[&str]) -> (String, String) {
+    let mut args = vec!["run", "--no-wait", "--sh", source];
+    args.extend_from_slice(options);
+    let out = home.ats(&args);
     assert_eq!(out.status.code(), Some(75));
     let line = String::from_utf8(out.stderr).unwrap();
     let id = |prefix: &str| {
@@ -92,6 +98,35 @@ fn submit(home: &Home, source: &str) -> (String, String) {
             .to_string()
     };
     (id("s_"), id("j_"))
+}
+
+#[test]
+fn light_commands_honor_explicit_dependencies_and_locks() {
+    let home = Home::new();
+    let _daemon = home.daemon();
+    let (failed, _) = submit(&home, "perl -e 'exit 9'");
+    assert_eq!(
+        home.ats(&["wait", &failed, "--wait", "10s"]).status.code(),
+        Some(9)
+    );
+    let out = home.ats(&["run", "--after", &failed, "--", "echo", "must not run"]);
+    assert_eq!(out.status.code(), Some(76), "{out:?}");
+    assert!(out.stdout.is_empty());
+
+    let (holding, job) = submit_with_options(&home, "perl -e 'sleep 30'", &["--lock", "shared"]);
+    wait_until("lock holder", Duration::from_secs(5), || {
+        home.job(&job)["state"] == "running"
+    });
+    let (waiting, waiter) = submit_with_options(&home, "echo ready", &["--lock", "shared"]);
+    assert_eq!(home.job(&waiter)["state"], "queued");
+    assert!(home.ats(&["cancel", &holding]).status.success());
+    assert_eq!(
+        home.ats(&["wait", &holding, "--wait", "10s"]).status.code(),
+        Some(1)
+    );
+    let out = home.ats(&["wait", &waiting, "--wait", "10s"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(out.stdout, b"ready\n");
 }
 
 fn log(home: &Home, job: &str) -> String {
@@ -133,9 +168,13 @@ fn a_job_survives_a_daemon_crash_and_reports_after_the_restart() {
 fn a_lost_executor_holds_the_job_until_its_processes_exit() {
     let home = Home::new();
     let _daemon = home.daemon();
-    let (_, job) = submit(&home, "perl -e 'sleep 3'");
+    let marker = home.path.join("command-started");
+    let (_, job) = submit(
+        &home,
+        &format!("echo started > {}; perl -e 'sleep 3'", marker.display()),
+    );
     wait_until("job start", Duration::from_secs(5), || {
-        home.job(&job)["state"] == "running"
+        home.job(&job)["state"] == "running" && marker.exists()
     });
 
     let executor = home.job(&job)["executor_pid"].as_i64().unwrap() as i32;
@@ -151,5 +190,5 @@ fn a_lost_executor_holds_the_job_until_its_processes_exit() {
     });
     assert!(home.job(&job)["exit_code"].is_null());
     // The killed executor could not remove its error log.
-    let _ = std::fs::remove_file(std::env::temp_dir().join(format!("ats/executors/{job}.log")));
+    let _ = std::fs::remove_file(home.path.join("executors").join(format!("{job}.log")));
 }

@@ -224,9 +224,13 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
             };
             // Inside a job the command runs directly: queueing it would
             // wait on the job that is already holding its memory (design
-            // 6.3). Light, interactive and service commands gain nothing
-            // from the queue.
-            if std::env::var_os(executor::JOB_ENV).is_some() || runs_directly(&paths, &spec)? {
+            // 6.3). Other direct commands still queue when explicit
+            // dependencies or locks need the scheduler.
+            if std::env::var_os(executor::JOB_ENV).is_some()
+                || (options.after.is_empty()
+                    && options.lock.is_empty()
+                    && runs_directly(&paths, &spec)?)
+            {
                 use std::os::unix::process::CommandExt;
                 return Err(spec.command().exec().into());
             }
@@ -325,8 +329,9 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         }
         Command::Executor { job, spec } => {
             let spec: runspec::RunSpec = serde_json::from_str(&spec)?;
+            let error_log = executor::error_log(&paths, &job);
             executor::run(paths, job.clone(), spec, std::env::current_dir()?).await?;
-            let _ = std::fs::remove_file(executor::error_log(&job));
+            let _ = std::fs::remove_file(error_log);
             Ok(ExitCode::SUCCESS)
         }
     }

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ats daemon API
-  version: 0.1.0
+  version: 0.1.1
   description: |
     API of the Agent Task Scheduler daemon. The CLI, executors and hooks reach
     it over a unix socket in the data directory; clients that cannot reach the
@@ -151,7 +151,7 @@ paths:
 
   /v1/jobs/{id}/started:
     post:
-      summary: Executor started the command
+      summary: Executor registered the process group before starting the command
       parameters:
         - { $ref: '#/components/parameters/Id' }
       requestBody:

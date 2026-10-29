@@ -206,7 +206,7 @@ pub async fn run(
         created["job"].as_str().unwrap_or_default(),
     );
 
-    match executor::spawn_detached(job, &spec, &cwd) {
+    match executor::spawn_detached(paths, job, &spec, &cwd) {
         // Register the executor before this process can exit, so the job
         // always has a known starter (the executor registers too).
         Ok(pid) => {

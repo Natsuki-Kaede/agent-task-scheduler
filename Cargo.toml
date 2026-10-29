@@ -1,6 +1,6 @@
 [package]
 name = "agent-task-scheduler"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Local scheduler that queues resource-heavy commands from AI agents and admits them by machine capacity"
 license = "GPL-3.0-only"
@@ -25,6 +25,7 @@ rand = "0.10.3"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
+shlex = "2.0.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "net", "fs", "signal", "process", "time", "sync", "io-util"] }
 toml = "1.1.8"

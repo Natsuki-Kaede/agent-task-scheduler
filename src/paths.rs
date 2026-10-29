@@ -22,6 +22,8 @@ pub struct Paths {
     pub installed: PathBuf,
     /// User tool profiles (design 8.2).
     pub profiles: PathBuf,
+    /// Private temporary files shared by this instance's clients.
+    pub temporary: PathBuf,
     /// Request-file channel. It lives under the temporary directory because
     /// sandboxed agents can usually write there but not to the data
     /// directory (design 4).
@@ -41,7 +43,9 @@ impl Paths {
                 let home = dirs::data_dir()
                     .context("no platform data directory")?
                     .join("ats");
-                let requests = std::env::temp_dir().join("ats").join("requests");
+                // SAFETY: geteuid has no preconditions.
+                let temporary = temporary_root(&std::env::temp_dir(), unsafe { libc::geteuid() });
+                let requests = temporary.join("requests");
                 Ok(Self::with(home, requests))
             }
         }
@@ -50,6 +54,10 @@ impl Paths {
     /// Builds paths under `home`, with the request channel at `requests`.
     pub fn with(home: PathBuf, requests: PathBuf) -> Self {
         Self {
+            temporary: requests
+                .parent()
+                .expect("request directory has a parent")
+                .to_path_buf(),
             db: home.join("ats.db"),
             socket: home.join("ats.sock"),
             lock: home.join("daemon.lock"),
@@ -59,6 +67,28 @@ impl Paths {
             profiles: home.join("profiles.d"),
             home,
             requests,
+        }
+    }
+}
+
+fn temporary_root(base: &std::path::Path, uid: u32) -> PathBuf {
+    base.join(format!("ats-{uid}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporary_directories_are_separate_for_users_and_instances() {
+        let base = PathBuf::from("/tmp");
+        let a = temporary_root(&base, 1000);
+        let b = temporary_root(&base, 1001);
+        assert!(!a.starts_with(&b) && !b.starts_with(&a));
+        for home in [base.join("one"), base.join("two")] {
+            let paths = Paths::with(home.clone(), home.join("requests"));
+            assert_eq!(paths.temporary, home);
+            assert!(paths.requests.starts_with(&paths.temporary));
         }
     }
 }

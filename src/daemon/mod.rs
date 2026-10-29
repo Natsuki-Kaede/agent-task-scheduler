@@ -34,6 +34,7 @@ const SETTLE_EVERY: u64 = 5;
 pub async fn run(paths: Paths, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
     create_private_dir(&paths.home)?;
     create_private_dir(&paths.logs)?;
+    create_private_dir(&paths.temporary)?;
     let _lock = lock::acquire(&paths.lock)?;
 
     let store = Store::open(&paths.db)?;

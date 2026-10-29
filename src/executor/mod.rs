@@ -99,7 +99,7 @@ fn log_dir(paths: &Paths, job: &str) -> Result<PathBuf> {
     if std::fs::create_dir_all(&preferred).is_ok() {
         return Ok(preferred);
     }
-    let fallback = std::env::temp_dir().join("ats").join("logs").join(job);
+    let fallback = paths.temporary.join("logs").join(job);
     crate::channel::prepare(&fallback)?;
     Ok(fallback)
 }
@@ -154,11 +154,8 @@ pub async fn run(paths: Paths, job: String, spec: RunSpec, cwd: PathBuf) -> Resu
         .any(|v| std::env::var_os(v).is_some());
     let pool = match terms["jobserver_tokens"].as_u64() {
         Some(tokens) if !own_jobserver => {
-            let pool = jobserver::Pool::create(
-                &std::env::temp_dir().join("ats").join("jobserver"),
-                &job,
-                tokens as u32,
-            )?;
+            let pool =
+                jobserver::Pool::create(&paths.temporary.join("jobserver"), &job, tokens as u32)?;
             cmd.env("MAKEFLAGS", pool.makeflags(tokens as u32));
             Some(pool)
         }
@@ -178,25 +175,40 @@ async fn run_command(
     dir: &Path,
 ) -> Result<()> {
     let (paths, job) = (paths.clone(), job.to_string());
+    // Keep the group alive until its id is committed and the command has
+    // joined it. If this executor dies before registration, EOF makes the
+    // leader exit without having started any user command.
+    let mut leader = tokio::process::Command::new("/bin/sh")
+        .args(["-c", "read -r _"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .context("starting the job's process group")?;
+    let pgid = leader.id().context("group leader has no pid")? as i32;
+    post(
+        &paths,
+        &format!("/v1/jobs/{job}/started"),
+        json!({ "log_path": dir, "pgid": pgid }),
+    )
+    .await?;
     cmd.current_dir(cwd)
         .env(JOB_ENV, &job)
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0);
-    let mut child = match cmd.spawn() {
+        .process_group(pgid);
+    let spawned = cmd.spawn();
+    drop(leader.stdin.take());
+    leader.wait().await?;
+    let mut child = match spawned {
         Ok(child) => child,
         Err(e) => {
             std::fs::write(
                 dir.join("stderr.log"),
                 format!("ats: could not start the command: {e}\n"),
             )?;
-            post(
-                &paths,
-                &format!("/v1/jobs/{job}/started"),
-                json!({ "log_path": dir }),
-            )
-            .await?;
             post(
                 &paths,
                 &format!("/v1/jobs/{job}/finished"),
@@ -206,14 +218,6 @@ async fn run_command(
             return Ok(());
         }
     };
-    let pgid = child.id().context("child has no pid")? as i32;
-    post(
-        &paths,
-        &format!("/v1/jobs/{job}/started"),
-        json!({ "log_path": dir, "pgid": pgid }),
-    )
-    .await?;
-
     let out = tokio::spawn(pump(
         child.stdout.take().expect("piped stdout"),
         dir.join("stdout.log"),
@@ -224,9 +228,11 @@ async fn run_command(
     ));
 
     let mut canceled = false;
+    let cancel = wait_for_cancel(&paths, &job);
+    tokio::pin!(cancel);
     let main = tokio::select! {
         status = child.wait() => Some(exit_code(status?)),
-        () = wait_for_cancel(&paths, &job) => { canceled = true; None }
+        () = &mut cancel => { canceled = true; None }
     };
     if canceled {
         stop_group(pgid).await;
@@ -245,8 +251,21 @@ async fn run_command(
 
     // The main execution process result needs the process to have exited
     // and both output streams to have reached the end (design 3).
-    out.await??;
-    err.await??;
+    let streams = async {
+        out.await??;
+        err.await??;
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::pin!(streams);
+    tokio::select! {
+        result = &mut streams => result?,
+        () = &mut cancel => {
+            stop_group(pgid).await;
+            streams.await?;
+            post(&paths, &format!("/v1/jobs/{job}/finished"), ended("canceled", Some(main))).await?;
+            return Ok(());
+        }
+    }
     post(
         &paths,
         &format!("/v1/jobs/{job}/main-result"),
@@ -258,7 +277,7 @@ async fn run_command(
     while procinfo::group_alive(pgid) {
         tokio::select! {
             () = tokio::time::sleep(GROUP_POLL) => {}
-            () = wait_for_cancel(&paths, &job) => {
+            () = &mut cancel => {
                 stop_group(pgid).await;
                 post(&paths, &format!("/v1/jobs/{job}/finished"), ended("canceled", Some(main))).await?;
                 return Ok(());
@@ -315,18 +334,15 @@ async fn stop_group(pgid: i32) {
 
 /// Where a detached executor writes its own errors; removed when it ends
 /// cleanly.
-pub fn error_log(job: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join("ats")
-        .join("executors")
-        .join(format!("{job}.log"))
+pub fn error_log(paths: &Paths, job: &str) -> PathBuf {
+    paths.temporary.join("executors").join(format!("{job}.log"))
 }
 
 /// Starts an executor for `job` as a detached process in its own session,
 /// so that it outlives the agent's tool call (design 7.1). The executor
 /// inherits the caller's environment, working directory and stdin. Returns
 /// its process id.
-pub fn spawn_detached(job: &str, spec: &RunSpec, cwd: &Path) -> Result<i32> {
+pub fn spawn_detached(paths: &Paths, job: &str, spec: &RunSpec, cwd: &Path) -> Result<i32> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().context("locating the ats binary")?;
     let mut cmd = std::process::Command::new(exe);
@@ -339,7 +355,8 @@ pub fn spawn_detached(job: &str, spec: &RunSpec, cwd: &Path) -> Result<i32> {
         .stdin(Stdio::inherit())
         .stdout(Stdio::null())
         .stderr({
-            let path = error_log(job);
+            crate::channel::prepare(&paths.temporary)?;
+            let path = error_log(paths, job);
             crate::channel::prepare(path.parent().expect("has a parent"))?;
             std::fs::File::create(path)?
         });
@@ -418,6 +435,29 @@ mod tests {
             "err\n"
         );
 
+        // Registering the group first preserves command-spawn failures.
+        let (_, j) = submit(&paths, "x").await;
+        let spec = RunSpec::Argv {
+            argv: vec![
+                dir.path()
+                    .join("missing-command")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+        };
+        run(paths.clone(), j.clone(), spec, "/".into())
+            .await
+            .unwrap();
+        let row = job(&paths, &j).await;
+        assert_eq!(row["state"], "start_failed");
+        assert_eq!(row["exit_code"], 127);
+        let logs = PathBuf::from(row["log_path"].as_str().unwrap());
+        assert!(
+            std::fs::read_to_string(logs.join("stderr.log"))
+                .unwrap()
+                .contains("could not start the command")
+        );
+
         // A background child keeps the job running after the main result.
         let (_, j) = submit(&paths, "x").await;
         let spec = sh("sleep 1 >/dev/null 2>&1 & echo started");
@@ -459,7 +499,107 @@ mod tests {
             "background child survived"
         );
 
+        // Cancellation works after the shell exits, both while draining
+        // inherited output pipes and while waiting on a quiet group.
+        for redirect in ["", ">/dev/null 2>&1"] {
+            let (s, j) = submit(&paths, "x").await;
+            let marker = dir.path().join("background.pids");
+            let _ = std::fs::remove_file(&marker);
+            let spec = sh(&format!(
+                "sleep 30 {redirect} & echo $$ $! > {}; exit 0",
+                crate::hook::quote(&marker.to_string_lossy())
+            ));
+            let mut task = tokio::spawn(run(paths.clone(), j.clone(), spec, "/".into()));
+            let pids = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(&marker) {
+                        let pids: Vec<i32> = text
+                            .split_whitespace()
+                            .filter_map(|p| p.parse().ok())
+                            .collect();
+                        if pids.len() == 2 && procinfo::start_time(pids[0]).is_none() {
+                            break pids;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            post(&paths, &format!("/v1/submissions/{s}/cancel"), json!({}))
+                .await
+                .unwrap();
+            let finished = tokio::time::timeout(Duration::from_secs(8), &mut task).await;
+            if finished.is_err() {
+                // SAFETY: stops the child this test started before failing.
+                unsafe { libc::kill(pids[1], libc::SIGKILL) };
+                task.abort();
+            }
+            finished.unwrap().unwrap().unwrap();
+            assert_eq!(job(&paths, &j).await["state"], "canceled", "{redirect}");
+            assert!(
+                procinfo::start_time(pids[1]).is_none(),
+                "background child survived: {redirect}"
+            );
+        }
+
         stop_tx.send(()).unwrap();
         d.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn executor_loss_before_registration_never_starts_the_command() {
+        use axum::{Json, Router, http::StatusCode, routing::post};
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        std::fs::create_dir_all(&paths.home).unwrap();
+        let listener = tokio::net::UnixListener::bind(&paths.socket).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let app = Router::new().route(
+            "/v1/jobs/j_gate/started",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let tx = tx.clone();
+                async move {
+                    tx.send(body["pgid"].as_i64().unwrap() as i32)
+                        .await
+                        .unwrap();
+                    // Model a daemon that has not committed the registration.
+                    std::future::pending::<StatusCode>().await
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let marker = dir.path().join("command-started");
+        let cmd = tokio::process::Command::from(
+            sh(&format!(
+                "echo started > {}",
+                crate::hook::quote(&marker.to_string_lossy())
+            ))
+            .command(),
+        );
+        let task = tokio::spawn(async move {
+            run_command(&paths, "j_gate", cmd, Path::new("/"), &paths.home).await
+        });
+        let pgid = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !marker.exists(),
+            "command ran before registration was committed"
+        );
+        // Dropping this task closes the same descriptors as executor exit.
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while procinfo::group_alive(pgid) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!marker.exists());
+        server.abort();
     }
 }
